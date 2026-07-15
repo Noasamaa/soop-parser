@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Noasamaa/soop-parser/internal/errs"
+	"github.com/Noasamaa/soop-parser/internal/model"
 	"github.com/Noasamaa/soop-parser/internal/proxy"
 )
 
@@ -25,7 +27,6 @@ var (
 const (
 	channelAPI = "https://live.sooplive.com/afreeca/player_live_api.php"
 	loginURL   = "https://login.sooplive.com/app/LoginAction.php"
-	authCheck  = "https://afevent2.sooplive.com/api/get_private_info.php"
 
 	resultOK            = 1
 	resultLoginRequired = -6
@@ -37,27 +38,7 @@ var cdnMap = map[string]string{
 	"lg_cdn": "lg_cdn_pc_web",
 }
 
-// Quality is one playable stream variant.
-type Quality struct {
-	Label      string `json:"label"`
-	Name       string `json:"name"`
-	DirectURL  string `json:"direct_url,omitempty"`
-	Protocol   string `json:"protocol"`
-}
-
-// Result is a resolved SOOP live stream.
-type Result struct {
-	Channel            string    `json:"channel"`
-	BNO                string    `json:"bno"`
-	Title              string    `json:"title,omitempty"`
-	Author             string    `json:"author,omitempty"`
-	PasswordProtected  bool      `json:"password_protected"`
-	Platform           string    `json:"platform"`
-	IsLive             bool      `json:"is_live"`
-	Qualities          []Quality `json:"qualities"`
-}
-
-// Client talks to SOOP player APIs.
+// Client talks to SOOP player APIs. Owns its http.Client (does not mutate callers).
 type Client struct {
 	http     *http.Client
 	username string
@@ -66,12 +47,28 @@ type Client struct {
 	mu       sync.Mutex
 }
 
-func NewClient(httpClient *http.Client, username, password string) *Client {
-	if httpClient.Jar == nil {
-		jar, _ := cookiejar.New(nil)
-		httpClient.Jar = jar
+// NewClient builds a dedicated client. base may be nil; Transport/Timeout are copied if set.
+func NewClient(base *http.Client, username, password string) *Client {
+	var transport http.RoundTripper = http.DefaultTransport
+	timeout := 45 * time.Second
+	if base != nil {
+		if base.Transport != nil {
+			transport = base.Transport
+		}
+		if base.Timeout > 0 {
+			timeout = base.Timeout
+		}
 	}
-	return &Client{http: httpClient, username: username, password: password}
+	jar, _ := cookiejar.New(nil)
+	return &Client{
+		http: &http.Client{
+			Transport: transport,
+			Timeout:   timeout,
+			Jar:       jar,
+		},
+		username: username,
+		password: password,
+	}
 }
 
 // ParseURL returns channel and optional bno.
@@ -289,7 +286,7 @@ func (c *Client) getViewURL(ctx context.Context, rmd, cdn, bno, quality string) 
 }
 
 // Resolve extracts multi-quality HLS URLs for a SOOP live URL.
-func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*Result, error) {
+func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*model.Result, error) {
 	channel, bno, err := ParseURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -349,8 +346,8 @@ func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*R
 	}
 
 	type qres struct {
-		q   Quality
-		ok  bool
+		q  model.Quality
+		ok bool
 	}
 	out := make([]qres, len(jobs))
 	var wg sync.WaitGroup
@@ -369,7 +366,7 @@ func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*R
 			if err != nil || view == "" {
 				return
 			}
-			out[i] = qres{ok: true, q: Quality{
+			out[i] = qres{ok: true, q: model.Quality{
 				Label:     j.label,
 				Name:      j.name,
 				DirectURL: appendQuery(view, "aid", aid),
@@ -379,7 +376,7 @@ func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*R
 	}
 	wg.Wait()
 
-	var qualities []Quality
+	var qualities []model.Quality
 	for _, r := range out {
 		if r.ok {
 			qualities = append(qualities, r.q)
@@ -392,7 +389,7 @@ func (c *Client) Resolve(ctx context.Context, rawURL, streamPassword string) (*R
 		return nil, errs.ResolveFailed("未能获取任何清晰度。可能原因：版权地区限制、CDN 拒绝、或直播刚结束。")
 	}
 
-	return &Result{
+	return &model.Result{
 		Channel:           channel,
 		BNO:               resolvedBNO,
 		Title:             asString(ch["TITLE"]),

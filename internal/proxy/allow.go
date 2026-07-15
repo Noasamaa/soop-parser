@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Platform host allowlists (tightened — no global cloudfront/akamai).
+// Platform host allowlists (no global cloudfront/akamai, no keyword matching).
 var (
 	soopSuffixes = []string{
 		"sooplive.com",
@@ -27,6 +27,24 @@ var (
 	}
 )
 
+func suffixesFor(platform string) []string {
+	if platform == "youtube" {
+		return youtubeSuffixes
+	}
+	return soopSuffixes
+}
+
+// MatchingSuffix returns the allowlisted suffix that host matches, or "".
+func MatchingSuffix(host, platform string) string {
+	host = strings.ToLower(host)
+	for _, s := range suffixesFor(platform) {
+		if host == s || strings.HasSuffix(host, "."+s) {
+			return s
+		}
+	}
+	return ""
+}
+
 // IsAllowedUpstream reports whether url may be fetched for the given platform.
 func IsAllowedUpstream(raw, platform string) bool {
 	u, err := url.Parse(raw)
@@ -38,19 +56,32 @@ func IsAllowedUpstream(raw, platform string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	if host == "" || net.ParseIP(host) != nil {
-		// Block raw IP SSRF targets
 		return false
 	}
-	suffixes := soopSuffixes
-	if platform == "youtube" {
-		suffixes = youtubeSuffixes
+	return MatchingSuffix(host, platform) != ""
+}
+
+// AllowedForSession restricts proxy targets to the same CDN family as the session.
+// sessionHost is the hostname of the resolved upstream (playlist/media root).
+func AllowedForSession(raw, platform, sessionHost string) bool {
+	if !IsAllowedUpstream(raw, platform) {
+		return false
 	}
-	for _, s := range suffixes {
-		if host == s || strings.HasSuffix(host, "."+s) {
-			return true
-		}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
 	}
-	return false
+	host := strings.ToLower(u.Hostname())
+	sessionHost = strings.ToLower(sessionHost)
+	if sessionHost == "" {
+		return true
+	}
+	if host == sessionHost {
+		return true
+	}
+	a := MatchingSuffix(sessionHost, platform)
+	b := MatchingSuffix(host, platform)
+	return a != "" && a == b
 }
 
 // UpstreamHeaders returns Referer/Origin for the platform.

@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Noasamaa/soop-parser/internal/config"
 	"github.com/Noasamaa/soop-parser/internal/errs"
+	"github.com/Noasamaa/soop-parser/internal/model"
 	"github.com/Noasamaa/soop-parser/internal/proxy"
 	"github.com/Noasamaa/soop-parser/internal/session"
 	"github.com/Noasamaa/soop-parser/internal/soop"
@@ -205,14 +207,6 @@ type resolveReq struct {
 	Proxy          *bool  `json:"proxy"`
 }
 
-type qualityOut struct {
-	Label     string `json:"label"`
-	Name      string `json:"name"`
-	DirectURL string `json:"direct_url,omitempty"`
-	PlayURL   string `json:"play_url,omitempty"`
-	Protocol  string `json:"protocol"`
-}
-
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	var req resolveReq
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
@@ -228,55 +222,33 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	raw := strings.TrimSpace(req.URL)
-	var (
-		platform, channel, bno, title, author string
-		isLive, pwdProt                       bool
-		qualities                             []qualityOut
-	)
+	var res *model.Result
+	var err error
 
 	switch {
 	case youtube.IsURL(raw):
-		res, err := s.youtube.Resolve(ctx, raw)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		platform, channel, bno = res.Platform, res.Channel, res.BNO
-		title, author, isLive = res.Title, res.Author, res.IsLive
-		for _, q := range res.Qualities {
-			qualities = append(qualities, qualityOut{
-				Label: q.Label, Name: q.Name, DirectURL: q.DirectURL, Protocol: q.Protocol,
-			})
-		}
+		res, err = s.youtube.Resolve(ctx, raw)
 	case isSOOPURL(raw):
-		res, err := s.soop.Resolve(ctx, raw, req.StreamPassword)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		platform, channel, bno = res.Platform, res.Channel, res.BNO
-		title, author, isLive = res.Title, res.Author, res.IsLive
-		pwdProt = res.PasswordProtected
-		for _, q := range res.Qualities {
-			qualities = append(qualities, qualityOut{
-				Label: q.Label, Name: q.Name, DirectURL: q.DirectURL, Protocol: q.Protocol,
-			})
-		}
+		res, err = s.soop.Resolve(ctx, raw, req.StreamPassword)
 	default:
 		writeErr(w, errs.InvalidURL("无法识别链接。支持 SOOP play.sooplive.com 或 YouTube URL"))
 		return
 	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	base := s.publicBase(r)
-	outQ := make([]qualityOut, 0, len(qualities))
-	for _, q := range qualities {
+	outQ := make([]model.Quality, 0, len(res.Qualities))
+	for _, q := range res.Qualities {
 		item := q
 		if useProxy && q.DirectURL != "" {
 			mt := session.MediaHLS
 			if q.Protocol == "progressive" {
 				mt = session.MediaProgressive
 			}
-			sess := s.sessions.Create(q.DirectURL, platform, channel, q.Name, q.Label, mt)
+			sess := s.sessions.Create(q.DirectURL, res.Platform, res.Channel, q.Name, q.Label, mt)
 			if mt == session.MediaProgressive {
 				item.PlayURL = s.withToken(base + "/api/media/" + sess.Token)
 			} else {
@@ -291,13 +263,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                 true,
-		"platform":           platform,
-		"is_live":            isLive,
-		"channel":            channel,
-		"bno":                bno,
-		"title":              title,
-		"author":             author,
-		"password_protected": pwdProt,
+		"platform":           res.Platform,
+		"is_live":            res.IsLive,
+		"channel":            res.Channel,
+		"bno":                res.BNO,
+		"title":              res.Title,
+		"author":             res.Author,
+		"password_protected": res.PasswordProtected,
 		"qualities":          outQ,
 	})
 }
@@ -368,7 +340,7 @@ func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 		if status == 403 || status == 451 {
 			code = 451
 		}
-		writeJSON(w, code, map[string]any{"ok": false, "message": "上游 playlist HTTP " + itoa(status)})
+		writeJSON(w, code, map[string]any{"ok": false, "message": "上游 playlist HTTP " + strconv.Itoa(status)})
 		return
 	}
 
@@ -387,7 +359,8 @@ func (s *Server) handleSegmentHEAD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw := r.URL.Query().Get("u")
-	if raw == "" || !proxy.IsAllowedUpstream(raw, sess.Platform) {
+	// Query().Get unescapes once; do not Unescape again (breaks signed CDN URLs).
+	if raw == "" || !proxy.AllowedForSession(raw, sess.Platform, sess.UpstreamHost) {
 		http.Error(w, "bad upstream", http.StatusBadRequest)
 		return
 	}
@@ -403,14 +376,14 @@ func (s *Server) handleSegment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "message": "播放会话不存在或已过期"})
 		return
 	}
-	// FastAPI already decodes query once; Go does the same via Query().Get
+	// Query().Get unescapes once; do not Unescape again (breaks signed CDN URLs).
 	raw := r.URL.Query().Get("u")
 	if raw == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "缺少 u 参数"})
 		return
 	}
-	if !proxy.IsAllowedUpstream(raw, sess.Platform) {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "上游 host 不在白名单"})
+	if !proxy.AllowedForSession(raw, sess.Platform, sess.UpstreamHost) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "上游 host 不在本会话允许范围"})
 		return
 	}
 
@@ -484,7 +457,7 @@ func (s *Server) streamUpstream(w http.ResponseWriter, r *http.Request, raw, pla
 
 	if resp.StatusCode >= 400 {
 		// Real status — do not pretend 200 empty body
-		http.Error(w, "upstream HTTP "+itoa(resp.StatusCode), resp.StatusCode)
+		http.Error(w, "upstream HTTP "+strconv.Itoa(resp.StatusCode), resp.StatusCode)
 		return
 	}
 
@@ -510,6 +483,8 @@ func (s *Server) streamUpstream(w http.ResponseWriter, r *http.Request, raw, pla
 }
 
 func (s *Server) fetchBytes(ctx context.Context, raw, platform, channel string) ([]byte, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.HTTPTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, raw, nil)
 	if err != nil {
 		return nil, 0, err
@@ -524,20 +499,6 @@ func (s *Server) fetchBytes(ctx context.Context, raw, platform, channel string) 
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	return body, resp.StatusCode, err
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [12]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }
 
 // LogRequest is a tiny middleware logger.

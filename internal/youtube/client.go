@@ -1,6 +1,7 @@
 package youtube
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,30 +14,12 @@ import (
 	"time"
 
 	"github.com/Noasamaa/soop-parser/internal/errs"
+	"github.com/Noasamaa/soop-parser/internal/model"
 )
 
 var hostRe = regexp.MustCompile(`(?i)(^|\.)((youtube\.com)|(youtube-nocookie\.com)|(youtu\.be)|(music\.youtube\.com))$`)
 
-// Quality is one browser-playable format.
-type Quality struct {
-	Label     string `json:"label"`
-	Name      string `json:"name"`
-	DirectURL string `json:"direct_url,omitempty"`
-	Protocol  string `json:"protocol"`
-}
-
-// Result is a resolved YouTube stream.
-type Result struct {
-	Channel  string    `json:"channel"`
-	BNO      string    `json:"bno"`
-	Title    string    `json:"title,omitempty"`
-	Author   string    `json:"author,omitempty"`
-	Platform string    `json:"platform"`
-	IsLive   bool      `json:"is_live"`
-	Qualities []Quality `json:"qualities"`
-}
-
-// Client resolves YouTube via the yt-dlp CLI (keeps pace with site changes).
+// Client resolves YouTube via the yt-dlp CLI.
 type Client struct {
 	timeout     time.Duration
 	cookiesFile string
@@ -81,19 +64,18 @@ type ytdlpFmt struct {
 }
 
 type ytdlpInfo struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Channel     string     `json:"channel"`
-	ChannelID   string     `json:"channel_id"`
-	Uploader    string     `json:"uploader"`
-	UploaderID  string     `json:"uploader_id"`
-	IsLive      bool       `json:"is_live"`
-	LiveStatus  string     `json:"live_status"`
-	URL         string     `json:"url"`
-	WebpageURL  string     `json:"webpage_url"`
-	Formats     []ytdlpFmt `json:"formats"`
-	Type        string     `json:"_type"`
-	Entries     []ytdlpInfo `json:"entries"`
+	ID         string      `json:"id"`
+	Title      string      `json:"title"`
+	Channel    string      `json:"channel"`
+	ChannelID  string      `json:"channel_id"`
+	Uploader   string      `json:"uploader"`
+	UploaderID string      `json:"uploader_id"`
+	IsLive     bool        `json:"is_live"`
+	LiveStatus string      `json:"live_status"`
+	URL        string      `json:"url"`
+	Formats    []ytdlpFmt  `json:"formats"`
+	Type       string      `json:"_type"`
+	Entries    []ytdlpInfo `json:"entries"`
 }
 
 func (c *Client) extract(ctx context.Context, raw string) (*ytdlpInfo, error) {
@@ -115,9 +97,12 @@ func (c *Client) extract(ctx context.Context, raw string) (*ytdlpInfo, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, c.ytdlpPath, args...)
-	out, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
-		msg := string(out)
+		msg := strings.TrimSpace(stderr.String() + "\n" + stdout.String())
 		if msg == "" {
 			msg = err.Error()
 		}
@@ -132,7 +117,7 @@ func (c *Client) extract(ctx context.Context, raw string) (*ytdlpInfo, error) {
 			return nil, errs.NotLive("直播未开始或频道离线")
 		case strings.Contains(low, "private video") || strings.Contains(low, "video unavailable"):
 			return nil, errs.ResolveFailed("视频不可用: " + truncate(msg, 200))
-		case strings.Contains(low, "executable file not found") || strings.Contains(low, "not found"):
+		case strings.Contains(low, "executable file not found"):
 			return nil, errs.ResolveFailed("服务器未安装 yt-dlp")
 		default:
 			return nil, errs.ResolveFailed("yt-dlp 解析失败: " + truncate(msg, 300))
@@ -140,7 +125,7 @@ func (c *Client) extract(ctx context.Context, raw string) (*ytdlpInfo, error) {
 	}
 
 	var info ytdlpInfo
-	if err := json.Unmarshal(out, &info); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
 		return nil, errs.ResolveFailed("yt-dlp JSON 解析失败")
 	}
 	if info.Type == "playlist" && len(info.Entries) > 0 {
@@ -197,8 +182,8 @@ func labelOf(f ytdlpFmt, protocol string) string {
 	return strings.Join(bits, " · ")
 }
 
-func pickQualities(info *ytdlpInfo) ([]Quality, error) {
-	var qualities []Quality
+func pickQualities(info *ytdlpInfo) ([]model.Quality, error) {
+	var qualities []model.Quality
 	seenHLS := map[int]bool{}
 	seenProg := map[int]bool{}
 
@@ -224,7 +209,7 @@ func pickQualities(info *ytdlpInfo) ([]Quality, error) {
 		if f.Height > 0 {
 			seenHLS[f.Height] = true
 		}
-		qualities = append(qualities, Quality{
+		qualities = append(qualities, model.Quality{
 			Label:     labelOf(f, "hls"),
 			Name:      f.FormatID,
 			DirectURL: f.URL,
@@ -237,7 +222,7 @@ func pickQualities(info *ytdlpInfo) ([]Quality, error) {
 		if f.URL == "" || isHLS(f) || !hasVideo(f) || !hasAudio(f) {
 			continue
 		}
-		if !strings.HasPrefix(strings.ToLower(f.Protocol), "http") && f.Protocol != "" {
+		if f.Protocol != "" && !strings.HasPrefix(strings.ToLower(f.Protocol), "http") {
 			continue
 		}
 		prog = append(prog, f)
@@ -259,7 +244,7 @@ func pickQualities(info *ytdlpInfo) ([]Quality, error) {
 		if name == "" {
 			name = "http-" + strconv.Itoa(f.Height)
 		}
-		qualities = append(qualities, Quality{
+		qualities = append(qualities, model.Quality{
 			Label:     labelOf(f, "progressive"),
 			Name:      name,
 			DirectURL: f.URL,
@@ -272,7 +257,7 @@ func pickQualities(info *ytdlpInfo) ([]Quality, error) {
 		if strings.Contains(info.URL, ".m3u8") {
 			proto = "hls"
 		}
-		qualities = append(qualities, Quality{
+		qualities = append(qualities, model.Quality{
 			Label:     "default",
 			Name:      "default",
 			DirectURL: info.URL,
@@ -305,7 +290,7 @@ func heightFromLabel(label string) int {
 }
 
 // Resolve extracts playable formats for a YouTube URL.
-func (c *Client) Resolve(ctx context.Context, raw string) (*Result, error) {
+func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error) {
 	if !IsURL(raw) {
 		return nil, errs.InvalidURL("不是有效的 YouTube 链接")
 	}
@@ -323,7 +308,7 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*Result, error) {
 	channel := firstNonEmpty(info.ChannelID, info.UploaderID, info.Channel, info.Uploader, "youtube")
 	author := firstNonEmpty(info.Channel, info.Uploader)
 	isLive := info.IsLive || info.LiveStatus == "is_live" || info.LiveStatus == "post_live"
-	return &Result{
+	return &model.Result{
 		Channel:   channel,
 		BNO:       firstNonEmpty(info.ID, "youtube"),
 		Title:     info.Title,

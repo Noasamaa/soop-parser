@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestIsHLSPlaylistURL(t *testing.T) {
 	if !IsHLSPlaylistURL("https://example.sooplive.com/a/b.m3u8?x=1") {
@@ -17,13 +20,32 @@ func TestIsAllowedUpstream(t *testing.T) {
 		t.Fatal("soop cdn")
 	}
 	if IsAllowedUpstream("https://soop.evil.com/x", "soop") {
-		t.Fatal("keyword bypass should be gone")
+		t.Fatal("evil host")
 	}
 	if IsAllowedUpstream("https://d111111abcdef8.cloudfront.net/x", "soop") {
 		t.Fatal("cloudfront should not be open")
 	}
 	if !IsAllowedUpstream("https://rr1---sn-a.googlevideo.com/videoplayback", "youtube") {
 		t.Fatal("googlevideo")
+	}
+}
+
+func TestAllowedForSession(t *testing.T) {
+	sess := "live-global-cdn-v02.sooplive.com"
+	ok := "https://live-global-cdn-v02.sooplive.com/seg.ts"
+	if !AllowedForSession(ok, "soop", sess) {
+		t.Fatal("same host")
+	}
+	ok2 := "https://other-edge.sooplive.com/seg.ts"
+	if !AllowedForSession(ok2, "soop", sess) {
+		t.Fatal("same sooplive.com family")
+	}
+	// different allowlisted family under soop platform
+	if AllowedForSession("https://cdn.afreecatv.com/x", "soop", sess) {
+		t.Fatal("should not jump afreeca when session is sooplive")
+	}
+	if AllowedForSession("https://rr1.googlevideo.com/x", "soop", sess) {
+		t.Fatal("youtube host with soop session")
 	}
 }
 
@@ -37,22 +59,10 @@ https://cdn.sooplive.com/preloading/x.ts
 https://cdn.sooplive.com/real/seg.ts
 `
 	out := RewriteM3U8(in, "https://cdn.sooplive.com/path/playlist.m3u8", "https://soop.uuun.de/api/hls/tok/proxy?u=")
-	if contains(out, "preloading") {
+	if strings.Contains(out, "preloading") {
 		t.Fatal("preloading not filtered")
 	}
-	if !contains(out, "https://soop.uuun.de/api/hls/tok/proxy?u=") {
+	if !strings.Contains(out, "https://soop.uuun.de/api/hls/tok/proxy?u=") {
 		t.Fatal("missing proxy prefix")
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
-		(func() bool {
-			for i := 0; i+len(sub) <= len(s); i++ {
-				if s[i:i+len(sub)] == sub {
-					return true
-				}
-			}
-			return false
-		})())
 }

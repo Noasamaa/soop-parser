@@ -9,17 +9,17 @@ import (
 
 // Config holds process configuration from environment variables.
 type Config struct {
-	AccessToken         string
-	PublicBaseURL       string
-	SOOPUsername        string
-	SOOPPassword        string
-	YouTubeCookiesFile  string
-	PlayTokenTTL        time.Duration
-	HTTPTimeout         time.Duration
-	Host                string
-	Port                string
-	MaxSessions         int
-	MaxUpstreamConns    int
+	AccessToken        string
+	PublicBaseURL      string
+	SOOPUsername       string
+	SOOPPassword       string
+	YouTubeCookiesFile string
+	PlayTokenTTL       time.Duration
+	HTTPTimeout        time.Duration
+	Host               string
+	Port               string
+	MaxSessions        int
+	MaxUpstreamConns   int
 }
 
 func getenv(key, def string) string {

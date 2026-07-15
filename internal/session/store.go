@@ -18,16 +18,16 @@ const (
 
 // Session holds one playable quality stream and proxy binding.
 type Session struct {
-	Token       string
-	UpstreamURL string
+	Token        string
+	UpstreamURL  string
 	UpstreamHost string
-	Platform    string
-	Channel     string
-	Quality     string
-	Label       string
-	MediaType   MediaType
-	CreatedAt   time.Time
-	ExpiresAt   time.Time
+	Platform     string
+	Channel      string
+	Quality      string
+	Label        string
+	MediaType    MediaType
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
 }
 
 // Store is a bounded in-memory session map with sliding TTL.
