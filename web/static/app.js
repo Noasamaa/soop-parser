@@ -26,10 +26,15 @@
   const catalogEl = $("catalog");
   const catalogMeta = $("catalogMeta");
   const catalogRefresh = $("catalogRefresh");
+  const scheduleEl = $("schedule");
+  const scheduleMeta = $("scheduleMeta");
+  const scheduleRefresh = $("scheduleRefresh");
+  const hupuPanel = $("hupuPanel");
 
   let hls = null;
   let authRequired = false;
   let catalogTimer = null;
+  let scheduleTimer = null;
 
   // 台湾英雄联盟中文解说常用源（频道页，开播时自动取当前场次）
   const DEFAULT_PRESETS = [
@@ -452,6 +457,165 @@
     }
   }
 
+  function stateBadge(state) {
+    if (state === "inProgress") return { cls: "live", text: "LIVE" };
+    if (state === "completed") return { cls: "done", text: "已结束" };
+    return { cls: "soon", text: "未开始" };
+  }
+
+  function fmtMatchTime(iso) {
+    try {
+      const d = new Date(iso);
+      const md = `${d.getMonth() + 1}/${d.getDate()}`;
+      const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+      return `${md}\n${hm}`;
+    } catch {
+      return "—";
+    }
+  }
+
+  function fmtDay(iso) {
+    try {
+      return new Date(iso).toLocaleDateString();
+    } catch {
+      return "";
+    }
+  }
+
+  function renderSchedule(data) {
+    if (!scheduleEl) return;
+    scheduleEl.innerHTML = "";
+    const tours = data.tournaments || [];
+    if (!tours.length) {
+      scheduleMeta.textContent = "当前无可见赛程（已结束超过 3 天的赛事会自动隐藏）";
+      return;
+    }
+    let matchN = 0;
+    let liveN = 0;
+    tours.forEach((t) => {
+      const matches = t.matches || [];
+      matchN += matches.length;
+      const card = document.createElement("div");
+      card.className = "sch-tour";
+      const head = document.createElement("div");
+      head.className = "sch-tour-head";
+      head.innerHTML = `<div class="sch-tour-title">${esc(t.label || t.slug)}</div>
+        <div class="sch-tour-range">${esc(fmtDay(t.start_date))} – ${esc(fmtDay(t.end_date))} · 隐藏于 ${esc(fmtDay(t.hide_after))}</div>`;
+      card.appendChild(head);
+
+      const list = document.createElement("div");
+      list.className = "sch-list";
+      if (!matches.length) {
+        const empty = document.createElement("div");
+        empty.className = "catalog-sub";
+        empty.style.padding = "10px 12px";
+        empty.textContent = "暂无对阵数据";
+        list.appendChild(empty);
+      }
+      matches.forEach((m) => {
+        if (m.state === "inProgress") liveN += 1;
+        const teams = m.teams || [];
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "sch-match";
+        const st = stateBadge(m.state);
+        const teamHTML = teams
+          .map((tm) => {
+            const img = tm.image
+              ? `<img src="${esc(tm.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+              : "";
+            return `<div class="sch-team">${img}<span>${esc(tm.code || tm.name || "?")}</span><span class="sch-score">${esc(String(tm.wins ?? 0))}</span></div>`;
+          })
+          .join("");
+        btn.innerHTML = `
+          <div class="sch-time">${esc(fmtMatchTime(m.start_time)).replace("\n", "<br/>")}</div>
+          <div class="sch-teams">${teamHTML || "—"}</div>
+          <div class="sch-meta">
+            <span class="sch-state ${st.cls}">${esc(st.text)}</span>
+            <span class="sch-bo">BO${esc(m.bo || 1)}${m.block ? " · " + esc(m.block) : ""}</span>
+          </div>`;
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(".sch-match").forEach((el) => el.classList.remove("active"));
+          btn.classList.add("active");
+          const a = teams[0]?.code || teams[0]?.name || "";
+          const b = teams[1]?.code || teams[1]?.name || "";
+          loadHupu(a, b, m);
+        });
+        list.appendChild(btn);
+      });
+      card.appendChild(list);
+      scheduleEl.appendChild(card);
+    });
+    const ts = data.updated_at ? new Date(data.updated_at).toLocaleTimeString() : "";
+    scheduleMeta.textContent = `${tours.length} 项赛事 · ${matchN} 场 · LIVE ${liveN}${ts ? " · 更新 " + ts : ""} · 结束后 3 天隐藏`;
+  }
+
+  async function loadSchedule() {
+    if (!scheduleEl) return;
+    try {
+      scheduleMeta.textContent = "加载赛程…";
+      const res = await fetch(withToken("/api/schedule"), { headers: authHeaders() });
+      if (res.status === 401) {
+        authRequired = true;
+        tokenWrap.classList.remove("hidden");
+        scheduleMeta.textContent = "需要访问令牌";
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        scheduleMeta.textContent = data.message || "赛程加载失败";
+        return;
+      }
+      renderSchedule(data);
+    } catch {
+      scheduleMeta.textContent = "赛程加载失败";
+    }
+  }
+
+  async function loadHupu(teamA, teamB, match) {
+    if (!hupuPanel) return;
+    hupuPanel.classList.remove("hidden");
+    hupuPanel.innerHTML = `<h4>虎扑评分 · ${esc(teamA)} vs ${esc(teamB)}</h4><p class="hupu-msg">拉取评分与热评中…</p>`;
+    try {
+      const q = new URLSearchParams({ team_a: teamA, team_b: teamB });
+      const res = await fetch(withToken("/api/hupu/rating?" + q.toString()), { headers: authHeaders() });
+      const data = await res.json();
+      const rating = data.rating || data;
+      if (!rating || rating.available === false) {
+        const msg = rating?.message || data.message || "暂无评分";
+        const link = rating?.source_url || "";
+        hupuPanel.innerHTML = `<h4>虎扑评分 · ${esc(teamA)} vs ${esc(teamB)}</h4>
+          <p class="hupu-msg">${esc(msg)}</p>
+          ${link ? `<a class="hupu-link" href="${esc(link)}" target="_blank" rel="noopener">去虎扑搜索</a>` : ""}`;
+        return;
+      }
+      const players = rating.players || [];
+      const comments = rating.comments || [];
+      const playersHTML = players.length
+        ? `<div class="hupu-players">${players
+            .map(
+              (p) => `<div class="hupu-player"><div class="name">${esc(p.name)}</div>
+              <div class="score">${esc(Number(p.score).toFixed(1))}</div>
+              <div class="team">${esc(p.team || "")}</div></div>`
+            )
+            .join("")}</div>`
+        : `<p class="hupu-msg">暂无选手评分</p>`;
+      const commentsHTML = comments.length
+        ? `<div class="hupu-comments">${comments
+            .map(
+              (c) => `<div class="hupu-comment"><div class="meta">${esc(c.user || "匿名")} · 亮了 ${esc(c.lights || 0)}</div>
+              <div>${esc(c.content)}</div></div>`
+            )
+            .join("")}</div>`
+        : `<p class="hupu-msg">暂无热评（或接口未返回评论）</p>`;
+      hupuPanel.innerHTML = `<h4>虎扑评分 · ${esc(rating.title || teamA + " vs " + teamB)}</h4>
+        ${playersHTML}${commentsHTML}
+        ${rating.source_url ? `<a class="hupu-link" href="${esc(rating.source_url)}" target="_blank" rel="noopener">来源 / 虎扑</a>` : ""}`;
+    } catch (err) {
+      hupuPanel.innerHTML = `<h4>虎扑评分</h4><p class="hupu-msg">加载失败：${esc(err.message || err)}</p>`;
+    }
+  }
+
   function renderPresets(list) {
     const el = $("presets");
     if (!el) return;
@@ -523,9 +687,14 @@
   if (catalogRefresh) {
     catalogRefresh.addEventListener("click", () => loadCatalog());
   }
+  if (scheduleRefresh) {
+    scheduleRefresh.addEventListener("click", () => loadSchedule());
+  }
 
   loadConfig();
+  loadSchedule();
   loadCatalog();
-  // refresh live covers/titles periodically
+  // refresh periodically
   catalogTimer = setInterval(loadCatalog, 90_000);
+  scheduleTimer = setInterval(loadSchedule, 120_000);
 })();

@@ -14,16 +14,28 @@
         <span class="logo">LIVE</span>
         <div>
           <h1>直播解析</h1>
-          <p class="sub">EWC 多路 · SOOP · B站 · 虎牙 · 个人使用</p>
+          <p class="sub">赛程 · 虎扑评分 · EWC 多路 · 个人使用</p>
         </div>
       </div>
       <div class="header-meta" id="configMeta">加载配置中…</div>
     </header>
 
+    <section class="card schedule-card">
+      <div class="catalog-head">
+        <div>
+          <div class="field-label" style="margin:0">比赛赛程</div>
+          <p class="catalog-sub" id="scheduleMeta">加载 EWC / MSI…（整届结束后 3 天自动隐藏）</p>
+        </div>
+        <button type="button" class="ghost" id="scheduleRefresh">刷新</button>
+      </div>
+      <div id="schedule" class="schedule" aria-label="比赛赛程"></div>
+      <div id="hupuPanel" class="hupu-panel hidden" aria-label="虎扑评分"></div>
+    </section>
+
     <section class="card catalog-card">
       <div class="catalog-head">
         <div>
-          <div class="field-label" style="margin:0">赛事列表</div>
+          <div class="field-label" style="margin:0">直播列表</div>
           <p class="catalog-sub" id="catalogMeta">加载实时封面 / 标题…</p>
         </div>
         <button type="button" class="ghost" id="catalogRefresh">刷新</button>

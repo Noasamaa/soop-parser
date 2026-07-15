@@ -17,9 +17,11 @@ import (
 	"github.com/Noasamaa/soop-parser/internal/catalog"
 	"github.com/Noasamaa/soop-parser/internal/config"
 	"github.com/Noasamaa/soop-parser/internal/errs"
+	"github.com/Noasamaa/soop-parser/internal/hupu"
 	"github.com/Noasamaa/soop-parser/internal/huya"
 	"github.com/Noasamaa/soop-parser/internal/model"
 	"github.com/Noasamaa/soop-parser/internal/proxy"
+	"github.com/Noasamaa/soop-parser/internal/schedule"
 	"github.com/Noasamaa/soop-parser/internal/session"
 	"github.com/Noasamaa/soop-parser/internal/soop"
 	"github.com/Noasamaa/soop-parser/internal/youtube"
@@ -34,6 +36,8 @@ type Server struct {
 	bilibili *bilibili.Client
 	huya     *huya.Client
 	catalog  *catalog.Service
+	schedule *schedule.Service
+	hupu     *hupu.Service
 	upstream *http.Client
 	static   http.Handler
 	mux      *http.ServeMux
@@ -68,6 +72,8 @@ func New(cfg config.Config, staticFS http.FileSystem) *Server {
 		bilibili: bilibili.NewClient(client),
 		huya:     huya.NewClient(client),
 		catalog:  catalog.New(client),
+		schedule: schedule.New(client),
+		hupu:     hupu.New(client),
 		upstream: streamClient,
 		mux:      http.NewServeMux(),
 	}
@@ -85,6 +91,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("HEAD /api/config", s.withAuth(s.handleConfig))
 	s.mux.HandleFunc("GET /api/catalog", s.withAuth(s.handleCatalog))
 	s.mux.HandleFunc("HEAD /api/catalog", s.withAuth(s.handleCatalog))
+	s.mux.HandleFunc("GET /api/schedule", s.withAuth(s.handleSchedule))
+	s.mux.HandleFunc("HEAD /api/schedule", s.withAuth(s.handleSchedule))
+	s.mux.HandleFunc("GET /api/hupu/rating", s.withAuth(s.handleHupuRating))
 	s.mux.HandleFunc("POST /api/resolve", s.withAuth(s.handleResolve))
 	s.mux.HandleFunc("GET /api/hls/{token}/playlist.m3u8", s.withAuth(s.handlePlaylist))
 	s.mux.HandleFunc("HEAD /api/hls/{token}/playlist.m3u8", s.withAuth(s.handlePlaylistHEAD))
@@ -238,6 +247,65 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		"ok":         true,
 		"updated_at": res.UpdatedAt,
 		"groups":     res.Groups,
+	})
+}
+
+func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	res, err := s.schedule.Get(ctx)
+	if err != nil {
+		writeErr(w, errs.ResolveFailed("赛程加载失败: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"updated_at":  res.UpdatedAt,
+		"tournaments": res.Tournaments,
+		"note":        "整届赛事 endDate 后 3 天自动隐藏（非单场结束）",
+	})
+}
+
+func (s *Server) handleHupuRating(w http.ResponseWriter, r *http.Request) {
+	teamA := strings.TrimSpace(r.URL.Query().Get("team_a"))
+	teamB := strings.TrimSpace(r.URL.Query().Get("team_b"))
+	matchID := strings.TrimSpace(r.URL.Query().Get("match_id"))
+	if matchID == "" && (teamA == "" || teamB == "") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "code": "bad_request",
+			"message": "需要 team_a+team_b 或 match_id",
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	var (
+		rating *hupu.MatchRating
+		err    error
+	)
+	if matchID != "" {
+		rating, err = s.hupu.RatingByMatchID(ctx, matchID)
+	} else {
+		rating, err = s.hupu.RatingForTeams(ctx, teamA, teamB)
+	}
+	if err != nil {
+		// still return structured payload when possible
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"available": false,
+			"message":   err.Error(),
+			"team_a":    teamA,
+			"team_b":    teamB,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"rating": rating,
 	})
 }
 
