@@ -18,13 +18,10 @@ import (
 )
 
 var (
-	// live.bilibili.com/123 / h5/123 / blanc/123
-	urlRe = regexp.MustCompile(`(?i)(?:live\.bilibili\.com/(?:h5/|blanc/)?)(\d+)`)
-	// bare room id
-	idRe = regexp.MustCompile(`^\d{1,12}$`)
+	urlRe = regexp.MustCompile(`(?i)live\.bilibili\.com/(?:h5/|blanc/)?(\d+)`)
+	idRe  = regexp.MustCompile(`^\d{1,12}$`)
 )
 
-// Common qn labels used by Bilibili live.
 var qnLabels = map[int]string{
 	30000: "杜比",
 	20000: "4K",
@@ -36,14 +33,15 @@ var qnLabels = map[int]string{
 }
 
 const (
-	ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
+	ua          = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 	roomInitAPI = "https://api.live.bilibili.com/room/v1/Room/room_init"
 	playInfoAPI = "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo"
 	roomInfoAPI = "https://api.live.bilibili.com/room/v1/Room/get_info"
+	maxQnFetch  = 5 // cap sequential playInfo calls
+	maxBody     = 2 << 20
 )
 
-// Client talks to Bilibili live APIs (resolve-only; no proxy needed for CN CDN).
+// Client resolves Bilibili live play URLs (direct CDN).
 type Client struct {
 	http *http.Client
 }
@@ -60,15 +58,10 @@ func NewClient(base *http.Client) *Client {
 			timeout = base.Timeout
 		}
 	}
-	return &Client{
-		http: &http.Client{
-			Transport: transport,
-			Timeout:   timeout,
-		},
-	}
+	return &Client{http: &http.Client{Transport: transport, Timeout: timeout}}
 }
 
-// IsURL reports whether raw looks like a Bilibili live link or room id.
+// IsURL reports whether raw is a Bilibili live link or bare room id.
 func IsURL(raw string) bool {
 	_, err := ParseRoomID(raw)
 	return err == nil
@@ -83,7 +76,6 @@ func ParseRoomID(raw string) (string, error) {
 	if idRe.MatchString(raw) {
 		return raw, nil
 	}
-	// allow bare path-like "live.bilibili.com/123" without scheme
 	if !strings.Contains(raw, "://") && strings.Contains(strings.ToLower(raw), "bilibili") {
 		raw = "https://" + raw
 	}
@@ -91,18 +83,16 @@ func ParseRoomID(raw string) (string, error) {
 	if err != nil {
 		return "", errs.InvalidURL("无效的 Bilibili 链接")
 	}
-	host := strings.ToLower(u.Host)
+	host := strings.ToLower(u.Hostname())
 	if host != "" && !strings.Contains(host, "bilibili.com") {
 		return "", errs.InvalidURL("无效的 Bilibili 链接")
 	}
 	if m := urlRe.FindStringSubmatch(raw); m != nil {
 		return m[1], nil
 	}
-	// path segments: /123 or /h5/123
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if idRe.MatchString(parts[i]) {
-			return parts[i], nil
+	for _, p := range strings.Split(strings.Trim(u.Path, "/"), "/") {
+		if idRe.MatchString(p) {
+			return p, nil
 		}
 	}
 	return "", errs.InvalidURL("无效的 Bilibili 直播链接，示例：https://live.bilibili.com/6")
@@ -115,10 +105,47 @@ type apiEnvelope struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+type roomInitData struct {
+	RoomID     int64 `json:"room_id"`
+	LiveStatus int   `json:"live_status"` // 0 off, 1 live, 2 round
+}
+
+type roomInfoData struct {
+	Title string `json:"title"`
+}
+
+type playInfoData struct {
+	PlayURLInfo *struct {
+		PlayURL *struct {
+			GQnDesc []struct {
+				Qn   int    `json:"qn"`
+				Desc string `json:"desc"`
+			} `json:"g_qn_desc"`
+			Stream []streamProto `json:"stream"`
+		} `json:"playurl"`
+	} `json:"playurl_info"`
+}
+
+type streamProto struct {
+	ProtocolName string `json:"protocol_name"`
+	Format       []struct {
+		FormatName string `json:"format_name"`
+		Codec      []struct {
+			CodecName string `json:"codec_name"`
+			BaseURL   string `json:"base_url"`
+			AcceptQn  []int  `json:"accept_qn"`
+			URLInfo   []struct {
+				Host  string `json:"host"`
+				Extra string `json:"extra"`
+			} `json:"url_info"`
+		} `json:"codec"`
+	} `json:"format"`
+}
+
 func (c *Client) getJSON(ctx context.Context, endpoint string, q url.Values, dest any) error {
 	u := endpoint
 	if len(q) > 0 {
-		u = endpoint + "?" + q.Encode()
+		u += "?" + q.Encode()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -132,7 +159,7 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, q url.Values, des
 		return errs.WrapResolve(err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return errs.WrapResolve(err)
 	}
@@ -164,53 +191,7 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, q url.Values, des
 	return nil
 }
 
-type roomInitData struct {
-	RoomID     int64 `json:"room_id"`
-	ShortID    int64 `json:"short_id"`
-	UID        int64 `json:"uid"`
-	LiveStatus int   `json:"live_status"` // 0 off, 1 live, 2 round
-}
-
-type roomInfoData struct {
-	RoomID     int64  `json:"room_id"`
-	Title      string `json:"title"`
-	UID        int64  `json:"uid"`
-	LiveStatus int    `json:"live_status"`
-	Uname      string `json:"uname"` // sometimes empty; filled via other field
-}
-
-type playInfoData struct {
-	RoomID      int64 `json:"room_id"`
-	LiveStatus  int   `json:"live_status"`
-	PlayURLInfo *struct {
-		PlayURL *struct {
-			GQnDesc []struct {
-				Qn   int    `json:"qn"`
-				Desc string `json:"desc"`
-			} `json:"g_qn_desc"`
-			Stream []streamProto `json:"stream"`
-		} `json:"playurl"`
-	} `json:"playurl_info"`
-}
-
-type streamProto struct {
-	ProtocolName string `json:"protocol_name"` // http_stream | http_hls
-	Format       []struct {
-		FormatName string `json:"format_name"` // flv | ts | fmp4
-		Codec      []struct {
-			CodecName string `json:"codec_name"` // avc | hevc
-			BaseURL   string `json:"base_url"`
-			CurrentQn int    `json:"current_qn"`
-			AcceptQn  []int  `json:"accept_qn"`
-			URLInfo   []struct {
-				Host  string `json:"host"`
-				Extra string `json:"extra"`
-			} `json:"url_info"`
-		} `json:"codec"`
-	} `json:"format"`
-}
-
-// Resolve extracts multi-quality FLV/HLS URLs for a Bilibili live room.
+// Resolve extracts multi-quality HLS/FLV URLs for a Bilibili live room.
 func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error) {
 	roomID, err := ParseRoomID(raw)
 	if err != nil {
@@ -221,65 +202,54 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 	if err := c.getJSON(ctx, roomInitAPI, url.Values{"id": {roomID}}, &init); err != nil {
 		return nil, err
 	}
-	realID := strconv.FormatInt(init.RoomID, 10)
-	if init.RoomID == 0 {
-		realID = roomID
+	realID := roomID
+	if init.RoomID != 0 {
+		realID = strconv.FormatInt(init.RoomID, 10)
 	}
 	if init.LiveStatus != 1 {
 		return nil, errs.NotLive("该 Bilibili 直播间未开播")
 	}
 
-	title, author := "", ""
+	title := ""
 	var info roomInfoData
 	if err := c.getJSON(ctx, roomInfoAPI, url.Values{"room_id": {realID}}, &info); err == nil {
 		title = info.Title
 	}
 
-	// First probe to get accept_qn + g_qn_desc
-	play, err := c.fetchPlayInfo(ctx, realID, 10000)
+	first, err := c.fetchPlayInfo(ctx, realID, 10000)
 	if err != nil {
 		return nil, err
 	}
-	if play.LiveStatus != 0 && play.LiveStatus != 1 {
-		// some responses omit or use same as room
-	}
-
-	qnDesc := map[int]string{}
-	var accept []int
-	if play.PlayURLInfo != nil && play.PlayURLInfo.PlayURL != nil {
-		for _, d := range play.PlayURLInfo.PlayURL.GQnDesc {
-			if d.Desc != "" {
-				qnDesc[d.Qn] = d.Desc
-			}
-		}
-		for _, st := range play.PlayURLInfo.PlayURL.Stream {
-			for _, f := range st.Format {
-				for _, codec := range f.Codec {
-					for _, q := range codec.AcceptQn {
-						accept = append(accept, q)
-					}
-				}
-			}
-		}
-	}
-	accept = uniqueInts(accept)
+	qnDesc, accept := collectQnMeta(first)
 	if len(accept) == 0 {
 		accept = []int{10000, 400, 250, 150, 80}
 	}
-	// high quality first
 	sort.Slice(accept, func(i, j int) bool { return accept[i] > accept[j] })
-
-	type seenKey struct {
-		qn       int
-		protocol string
+	if len(accept) > maxQnFetch {
+		accept = accept[:maxQnFetch]
 	}
-	seen := map[seenKey]bool{}
-	var qualities []model.Quality
 
-	// try each qn; prefer HLS (ts) then FLV for browser / PotPlayer
+	// Reuse first response for its matching qn (usually 10000 / max).
+	byQn := map[int]*playInfoData{10000: first}
 	for _, qn := range accept {
+		if _, ok := byQn[qn]; ok {
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
 		p, err := c.fetchPlayInfo(ctx, realID, qn)
-		if err != nil || p.PlayURLInfo == nil || p.PlayURLInfo.PlayURL == nil {
+		if err != nil {
+			continue
+		}
+		byQn[qn] = p
+	}
+
+	var qualities []model.Quality
+	seen := map[string]bool{}
+	for _, qn := range accept {
+		p := byQn[qn]
+		if p == nil {
 			continue
 		}
 		label := qnDesc[qn]
@@ -289,89 +259,22 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 		if label == "" {
 			label = fmt.Sprintf("qn%d", qn)
 		}
-
-		// collect candidates: protocol priority hls first for same qn
-		type cand struct {
-			url      string
-			protocol string // hls | progressive
-			format   string
-			codec    string
-		}
-		var cands []cand
-		for _, st := range p.PlayURLInfo.PlayURL.Stream {
-			for _, f := range st.Format {
-				for _, codec := range f.Codec {
-					// prefer avc for max player compatibility
-					if codec.CodecName != "" && codec.CodecName != "avc" && codec.CodecName != "h264" {
-						continue
-					}
-					if len(codec.URLInfo) == 0 || codec.BaseURL == "" {
-						continue
-					}
-					host := codec.URLInfo[0].Host
-					extra := codec.URLInfo[0].Extra
-					full := strings.TrimRight(host, "/") + codec.BaseURL + extra
-					proto := "progressive"
-					if st.ProtocolName == "http_hls" || f.FormatName == "ts" || f.FormatName == "fmp4" {
-						proto = "hls"
-					}
-					if f.FormatName == "flv" || st.ProtocolName == "http_stream" {
-						proto = "progressive"
-					}
-					cands = append(cands, cand{url: full, protocol: proto, format: f.FormatName, codec: codec.CodecName})
-				}
-			}
-		}
-		// order: hls/ts, hls/fmp4, flv
-		sort.SliceStable(cands, func(i, j int) bool {
-			score := func(c cand) int {
-				if c.protocol == "hls" && c.format == "ts" {
-					return 0
-				}
-				if c.protocol == "hls" {
-					return 1
-				}
-				return 2
-			}
-			return score(cands[i]) < score(cands[j])
-		})
-
-		// take one HLS + one FLV per qn if available
-		gotHLS, gotFLV := false, false
-		for _, cd := range cands {
-			if cd.protocol == "hls" {
-				if gotHLS {
-					continue
-				}
-				key := seenKey{qn: qn, protocol: "hls"}
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				gotHLS = true
-				name := fmt.Sprintf("qn%d_hls", qn)
+		hlsURL, flvURL := pickStreams(p)
+		if hlsURL != "" {
+			name := fmt.Sprintf("qn%d_hls", qn)
+			if !seen[name] {
+				seen[name] = true
 				qualities = append(qualities, model.Quality{
-					Label:     label + " HLS",
-					Name:      name,
-					DirectURL: cd.url,
-					Protocol:  "hls",
+					Label: label + " HLS", Name: name, DirectURL: hlsURL, Protocol: "hls",
 				})
-			} else {
-				if gotFLV {
-					continue
-				}
-				key := seenKey{qn: qn, protocol: "flv"}
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				gotFLV = true
-				name := fmt.Sprintf("qn%d_flv", qn)
+			}
+		}
+		if flvURL != "" {
+			name := fmt.Sprintf("qn%d_flv", qn)
+			if !seen[name] {
+				seen[name] = true
 				qualities = append(qualities, model.Quality{
-					Label:     label + " FLV",
-					Name:      name,
-					DirectURL: cd.url,
-					Protocol:  "progressive",
+					Label: label + " FLV", Name: name, DirectURL: flvURL, Protocol: "progressive",
 				})
 			}
 		}
@@ -380,16 +283,95 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 	if len(qualities) == 0 {
 		return nil, errs.ResolveFailed("未能获取 Bilibili 流地址（可能未开播或接口变更）")
 	}
-
 	return &model.Result{
 		Channel:   realID,
 		BNO:       realID,
 		Title:     title,
-		Author:    author,
 		Platform:  "bilibili",
 		IsLive:    true,
 		Qualities: qualities,
 	}, nil
+}
+
+func collectQnMeta(p *playInfoData) (map[int]string, []int) {
+	desc := map[int]string{}
+	var accept []int
+	if p == nil || p.PlayURLInfo == nil || p.PlayURLInfo.PlayURL == nil {
+		return desc, accept
+	}
+	for _, d := range p.PlayURLInfo.PlayURL.GQnDesc {
+		if d.Desc != "" {
+			desc[d.Qn] = d.Desc
+		}
+	}
+	seen := map[int]struct{}{}
+	for _, st := range p.PlayURLInfo.PlayURL.Stream {
+		for _, f := range st.Format {
+			for _, codec := range f.Codec {
+				for _, q := range codec.AcceptQn {
+					if _, ok := seen[q]; ok {
+						continue
+					}
+					seen[q] = struct{}{}
+					accept = append(accept, q)
+				}
+			}
+		}
+	}
+	return desc, accept
+}
+
+// pickStreams returns one AVC HLS and one FLV URL if present.
+func pickStreams(p *playInfoData) (hlsURL, flvURL string) {
+	if p == nil || p.PlayURLInfo == nil || p.PlayURLInfo.PlayURL == nil {
+		return "", ""
+	}
+	type cand struct {
+		url, kind, format string // kind: hls|flv
+	}
+	var list []cand
+	for _, st := range p.PlayURLInfo.PlayURL.Stream {
+		for _, f := range st.Format {
+			for _, codec := range f.Codec {
+				if codec.CodecName != "" && codec.CodecName != "avc" && codec.CodecName != "h264" {
+					continue
+				}
+				if len(codec.URLInfo) == 0 || codec.BaseURL == "" {
+					continue
+				}
+				full := strings.TrimRight(codec.URLInfo[0].Host, "/") + codec.BaseURL + codec.URLInfo[0].Extra
+				kind := "flv"
+				if st.ProtocolName == "http_hls" || f.FormatName == "ts" || f.FormatName == "fmp4" {
+					kind = "hls"
+				}
+				if f.FormatName == "flv" || st.ProtocolName == "http_stream" {
+					kind = "flv"
+				}
+				list = append(list, cand{url: full, kind: kind, format: f.FormatName})
+			}
+		}
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		score := func(c cand) int {
+			if c.kind == "hls" && c.format == "ts" {
+				return 0
+			}
+			if c.kind == "hls" {
+				return 1
+			}
+			return 2
+		}
+		return score(list[i]) < score(list[j])
+	})
+	for _, c := range list {
+		if c.kind == "hls" && hlsURL == "" {
+			hlsURL = c.url
+		}
+		if c.kind == "flv" && flvURL == "" {
+			flvURL = c.url
+		}
+	}
+	return hlsURL, flvURL
 }
 
 func (c *Client) fetchPlayInfo(ctx context.Context, roomID string, qn int) (*playInfoData, error) {
@@ -409,17 +391,4 @@ func (c *Client) fetchPlayInfo(ctx context.Context, roomID string, qn int) (*pla
 		return nil, err
 	}
 	return &data, nil
-}
-
-func uniqueInts(in []int) []int {
-	m := map[int]struct{}{}
-	var out []int
-	for _, v := range in {
-		if _, ok := m[v]; ok {
-			continue
-		}
-		m[v] = struct{}{}
-		out = append(out, v)
-	}
-	return out
 }

@@ -14,8 +14,6 @@ func TestParseRoom(t *testing.T) {
 		{"https://www.huya.com/lck", "lck"},
 		{"https://m.huya.com/123456", "123456"},
 		{"huya.com/abc_def", "abc_def"},
-		{"lck", "lck"},
-		{"12345", "12345"},
 	}
 	for _, c := range cases {
 		got, err := ParseRoom(c.in)
@@ -26,11 +24,18 @@ func TestParseRoom(t *testing.T) {
 			t.Fatalf("%q: got %s want %s", c.in, got, c.want)
 		}
 	}
+	// bare slug must NOT match (ambiguous with SOOP channel ids)
+	if IsURL("lck") || IsURL("12345") {
+		t.Fatal("bare id must not match huya without host")
+	}
 	if IsURL("https://live.bilibili.com/6") {
 		t.Fatal("bilibili should not match huya")
 	}
 	if !IsURL("https://www.huya.com/lck") {
 		t.Fatal("expected huya url")
+	}
+	if _, err := ParseRoom("https://www.huya.com/g"); err == nil {
+		t.Fatal("reserved path should fail")
 	}
 }
 
@@ -57,5 +62,14 @@ func TestBuildStreamParams(t *testing.T) {
 	}
 	if q.Get("ratio") != "0" {
 		t.Fatal("ratio")
+	}
+}
+
+func TestEnsureHTTPS(t *testing.T) {
+	if ensureHTTPS("http://a.com/x") != "https://a.com/x" {
+		t.Fatal("http upgrade")
+	}
+	if ensureHTTPS("//a.com/x") != "https://a.com/x" {
+		t.Fatal("scheme-relative")
 	}
 }

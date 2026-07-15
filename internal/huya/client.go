@@ -23,9 +23,11 @@ import (
 )
 
 var (
-	urlRe = regexp.MustCompile(`(?i)(?:(?:www|m)\.)?huya\.com/([A-Za-z0-9_-]+)`)
-	// hyPlayerConfig stream: base64 string or inline JSON
-	streamRe = regexp.MustCompile(`(?s)"?stream"?\s*:\s*(?:"([^"]+)"|(\{.+?\})\s*\}\s*;)`)
+	urlRe       = regexp.MustCompile(`(?i)(?:(?:www|m)\.)?huya\.com/([A-Za-z0-9_-]+)`)
+	streamB64Re = regexp.MustCompile(`"stream"\s*:\s*"([A-Za-z0-9+/=]+)"`)
+	liveLineRe  = regexp.MustCompile(`"liveLineUrl"\s*:\s*"([^"]+)"`)
+	roomNameRe  = regexp.MustCompile(`"roomName"\s*:\s*"([^"]*)"`)
+	nickRe      = regexp.MustCompile(`"nick"\s*:\s*"([^"]*)"`)
 )
 
 const (
@@ -36,9 +38,11 @@ const (
 	constVer   = 1
 	constSV    = 2401090219
 	constCodec = 264
+
+	maxPageBody = 4 << 20
 )
 
-// Client resolves Huya live FLV URLs (direct CDN; no proxy needed in CN).
+// Client resolves Huya live FLV URLs (direct CDN).
 type Client struct {
 	http *http.Client
 }
@@ -55,16 +59,16 @@ func NewClient(base *http.Client) *Client {
 			timeout = base.Timeout
 		}
 	}
-	return &Client{
-		http: &http.Client{
-			Transport: transport,
-			Timeout:   timeout,
-		},
-	}
+	return &Client{http: &http.Client{Transport: transport, Timeout: timeout}}
 }
 
-// IsURL reports whether raw is a Huya room URL or room id/slug.
+// IsURL reports whether raw is a Huya room URL (requires huya.com host).
+// Bare room numbers alone are not matched (ambiguous with Bilibili).
 func IsURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !strings.Contains(strings.ToLower(raw), "huya.com") {
+		return false
+	}
 	_, err := ParseRoom(raw)
 	return err == nil
 }
@@ -73,13 +77,7 @@ func IsURL(raw string) bool {
 func ParseRoom(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return "", errs.InvalidURL("请输入虎牙直播间链接或房间号")
-	}
-	// bare slug / numeric id
-	if !strings.Contains(raw, "/") && !strings.Contains(raw, ".") {
-		if regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(raw) {
-			return raw, nil
-		}
+		return "", errs.InvalidURL("请输入虎牙直播间链接")
 	}
 	if !strings.Contains(raw, "://") && strings.Contains(strings.ToLower(raw), "huya.com") {
 		raw = "https://" + raw
@@ -88,20 +86,44 @@ func ParseRoom(raw string) (string, error) {
 	if err != nil {
 		return "", errs.InvalidURL("无效的虎牙链接")
 	}
-	host := strings.ToLower(u.Host)
-	if host != "" && !strings.Contains(host, "huya.com") {
-		return "", errs.InvalidURL("无效的虎牙链接")
+	host := strings.ToLower(u.Hostname())
+	if host == "" || !strings.Contains(host, "huya.com") {
+		return "", errs.InvalidURL("无效的虎牙链接，示例：https://www.huya.com/lck")
 	}
-	if m := urlRe.FindStringSubmatch(raw); m != nil {
-		// skip reserved paths
-		seg := m[1]
-		switch strings.ToLower(seg) {
-		case "g", "video", "download", "help", "l":
-			return "", errs.InvalidURL("无效的虎牙直播间路径")
-		}
-		return seg, nil
+	m := urlRe.FindStringSubmatch(raw)
+	if m == nil {
+		return "", errs.InvalidURL("无效的虎牙直播链接，示例：https://www.huya.com/lck")
 	}
-	return "", errs.InvalidURL("无效的虎牙直播链接，示例：https://www.huya.com/lck")
+	seg := m[1]
+	switch strings.ToLower(seg) {
+	case "g", "video", "download", "help", "l":
+		return "", errs.InvalidURL("无效的虎牙直播间路径")
+	}
+	return seg, nil
+}
+
+type streamRoot struct {
+	Data []struct {
+		GameLiveInfo struct {
+			LiveID   string `json:"liveId"`
+			Nick     string `json:"nick"`
+			RoomName string `json:"roomName"`
+		} `json:"gameLiveInfo"`
+		GameStreamInfoList []streamInfo `json:"gameStreamInfoList"`
+	} `json:"data"`
+	VMultiStreamInfo []multiBitrate `json:"vMultiStreamInfo"`
+}
+
+type streamInfo struct {
+	SCdnType      string `json:"sCdnType"`
+	SStreamName   string `json:"sStreamName"`
+	SFlvURL       string `json:"sFlvUrl"`
+	SFlvURLSuffix string `json:"sFlvUrlSuffix"`
+	SFlvAntiCode  string `json:"sFlvAntiCode"`
+}
+
+type multiBitrate struct {
+	IBitRate int `json:"iBitRate"`
 }
 
 // Resolve extracts multi-bitrate FLV URLs for a Huya live room.
@@ -111,38 +133,24 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 		return nil, err
 	}
 
-	pageURL := "https://www.huya.com/" + room
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	page, err := c.fetchText(ctx, "https://www.huya.com/"+room, ua, "https://www.huya.com/")
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Referer", "https://www.huya.com/")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, errs.WrapResolve(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, errs.WrapResolve(err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, errs.ResolveFailed(fmt.Sprintf("虎牙页面 HTTP %d", resp.StatusCode))
-	}
 
-	streamJSON, err := extractStreamJSON(string(body))
+	streamJSON, err := extractStreamJSON(page)
 	if err != nil {
-		// fallback: mobile page liveLineUrl (single quality)
 		if u, title, nick, ok := c.tryMobile(ctx, room); ok {
 			return &model.Result{
-				Channel:   room,
-				BNO:       room,
-				Title:     title,
-				Author:    nick,
-				Platform:  "huya",
-				IsLive:    true,
-				Qualities: []model.Quality{{Label: "原画 FLV", Name: "source", DirectURL: u, Protocol: "progressive"}},
+				Channel:  room,
+				BNO:      room,
+				Title:    title,
+				Author:   nick,
+				Platform: "huya",
+				IsLive:   true,
+				Qualities: []model.Quality{{
+					Label: "原画 FLV", Name: "source", DirectURL: u, Protocol: "progressive",
+				}},
 			}, nil
 		}
 		return nil, err
@@ -162,7 +170,6 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 	if len(bitrates) == 0 {
 		bitrates = []multiBitrate{{IBitRate: 0}}
 	}
-	// sort high first (0 = source = highest)
 	sort.SliceStable(bitrates, func(i, j int) bool {
 		ai, aj := bitrates[i].IBitRate, bitrates[j].IBitRate
 		if ai == 0 {
@@ -173,66 +180,54 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 		}
 		return ai > aj
 	})
-
-	// prefer common CDNs order: AL, TX, HS, others
-	cdnRank := func(t string) int {
-		switch strings.ToUpper(t) {
-		case "AL", "ALICE":
-			return 0
-		case "TX":
-			return 1
-		case "HS", "HY":
-			return 2
-		default:
-			return 9
-		}
-	}
 	sort.SliceStable(streams, func(i, j int) bool {
 		return cdnRank(streams[i].SCdnType) < cdnRank(streams[j].SCdnType)
 	})
 
 	var qualities []model.Quality
 	seen := map[string]bool{}
-
-	// Use first good CDN line; multi bitrate via ratio param
 	for _, s := range streams {
 		if s.SFlvURL == "" || s.SStreamName == "" {
 			continue
 		}
-		base := ensureHTTPS(strings.TrimRight(s.SFlvURL, "/") + "/" + s.SStreamName + "." + orDefault(s.SFlvURLSuffix, "flv"))
+		suffix := s.SFlvURLSuffix
+		if suffix == "" {
+			suffix = "flv"
+		}
+		base := ensureHTTPS(strings.TrimRight(s.SFlvURL, "/") + "/" + s.SStreamName + "." + suffix)
 		anti := html.UnescapeString(s.SFlvAntiCode)
 		for _, br := range bitrates {
 			params, err := buildStreamParams(anti, s.SStreamName, br.IBitRate)
 			if err != nil {
 				continue
 			}
-			full := base + "?" + params.Encode()
-			label := bitrateLabel(br.IBitRate)
 			name := fmt.Sprintf("%s_%s", strings.ToLower(s.SCdnType), bitrateName(br.IBitRate))
 			if seen[name] {
 				continue
 			}
 			seen[name] = true
 			qualities = append(qualities, model.Quality{
-				Label:     label + " FLV",
+				Label:     bitrateLabel(br.IBitRate) + " FLV",
 				Name:      name,
-				DirectURL: full,
+				DirectURL: base + "?" + params.Encode(),
 				Protocol:  "progressive",
 			})
 		}
-		// one CDN is enough for playback; avoid flooding list
 		if len(qualities) > 0 {
-			break
+			break // one CDN line is enough
 		}
 	}
-
 	if len(qualities) == 0 {
 		return nil, errs.ResolveFailed("未能构造虎牙流地址（antiCode 解析失败或接口变更）")
 	}
 
+	bno := info.LiveID
+	if bno == "" {
+		bno = room
+	}
 	return &model.Result{
 		Channel:   room,
-		BNO:       firstNonEmpty(info.LiveID, room),
+		BNO:       bno,
 		Title:     info.RoomName,
 		Author:    info.Nick,
 		Platform:  "huya",
@@ -241,98 +236,80 @@ func (c *Client) Resolve(ctx context.Context, raw string) (*model.Result, error)
 	}, nil
 }
 
-type streamRoot struct {
-	Data []struct {
-		GameLiveInfo struct {
-			LiveID   string `json:"liveId"`
-			Nick     string `json:"nick"`
-			RoomName string `json:"roomName"`
-		} `json:"gameLiveInfo"`
-		GameStreamInfoList []struct {
-			SCdnType      string `json:"sCdnType"`
-			SStreamName   string `json:"sStreamName"`
-			SFlvURL       string `json:"sFlvUrl"`
-			SFlvURLSuffix string `json:"sFlvUrlSuffix"`
-			SFlvAntiCode  string `json:"sFlvAntiCode"`
-			SHlsURL       string `json:"sHlsUrl"`
-			SHlsURLSuffix string `json:"sHlsUrlSuffix"`
-			SHlsAntiCode  string `json:"sHlsAntiCode"`
-		} `json:"gameStreamInfoList"`
-	} `json:"data"`
-	VMultiStreamInfo []multiBitrate `json:"vMultiStreamInfo"`
+func cdnRank(t string) int {
+	switch strings.ToUpper(t) {
+	case "AL", "ALICE":
+		return 0
+	case "TX":
+		return 1
+	case "HS", "HY":
+		return 2
+	default:
+		return 9
+	}
 }
 
-type multiBitrate struct {
-	IBitRate int    `json:"iBitRate"`
-	SDisplay string `json:"sDisplayName"`
+func (c *Client) fetchText(ctx context.Context, pageURL, userAgent, referer string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", errs.WrapResolve(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPageBody))
+	if err != nil {
+		return "", errs.WrapResolve(err)
+	}
+	if resp.StatusCode >= 400 {
+		return "", errs.ResolveFailed(fmt.Sprintf("虎牙页面 HTTP %d", resp.StatusCode))
+	}
+	return string(body), nil
 }
 
 func extractStreamJSON(page string) ([]byte, error) {
-	// Prefer script containing hyPlayerConfig
 	idx := strings.Index(page, "hyPlayerConfig")
 	if idx < 0 {
 		return nil, errs.NotLive("未找到虎牙播放配置（可能未开播或页面结构变更）")
 	}
-	// search around config
-	window := page
-	if idx > 0 {
-		start := idx - 200
-		if start < 0 {
-			start = 0
-		}
-		end := idx + 500000
-		if end > len(page) {
-			end = len(page)
-		}
-		window = page[start:end]
+	start := idx - 200
+	if start < 0 {
+		start = 0
 	}
-	m := streamRe.FindStringSubmatch(window)
-	if m == nil {
-		// broader: "stream":{...} nested in config — try base64 only
-		b64re := regexp.MustCompile(`"stream"\s*:\s*"([A-Za-z0-9+/=]+)"`)
-		if bm := b64re.FindStringSubmatch(window); bm != nil {
-			dec, err := base64.StdEncoding.DecodeString(bm[1])
-			if err != nil {
-				return nil, errs.ResolveFailed("虎牙 stream base64 解码失败")
-			}
-			return dec, nil
-		}
-		return nil, errs.NotLive("该虎牙直播间未开播或无 stream 数据")
+	end := idx + 300000
+	if end > len(page) {
+		end = len(page)
 	}
-	if m[1] != "" {
+	window := page[start:end]
+
+	if m := streamB64Re.FindStringSubmatch(window); m != nil {
 		dec, err := base64.StdEncoding.DecodeString(m[1])
 		if err != nil {
-			// try raw URL-safe
-			dec, err = base64.RawStdEncoding.DecodeString(m[1])
-			if err != nil {
-				return nil, errs.ResolveFailed("虎牙 stream base64 解码失败")
-			}
+			return nil, errs.ResolveFailed("虎牙 stream base64 解码失败")
 		}
 		return dec, nil
 	}
-	// inline JSON object — m[2] may be truncated by non-greedy; re-extract balanced
-	raw := m[2]
-	if raw == "" {
-		return nil, errs.ResolveFailed("虎牙 stream 为空")
+
+	// Inline JSON: "stream": { ... }
+	key := strings.Index(window, `"stream"`)
+	if key < 0 {
+		key = strings.Index(window, "stream")
 	}
-	// if incomplete, try to find full object from "stream":
-	if !json.Valid([]byte(raw)) {
-		key := strings.Index(window, `"stream"`)
-		if key < 0 {
-			key = strings.Index(window, "stream")
-		}
-		if key >= 0 {
-			brace := strings.Index(window[key:], "{")
-			if brace >= 0 {
-				obj, ok := extractJSONObject(window[key+brace:])
-				if ok {
-					return []byte(obj), nil
-				}
+	if key >= 0 {
+		brace := strings.Index(window[key:], "{")
+		if brace >= 0 {
+			if obj, ok := extractJSONObject(window[key+brace:]); ok {
+				return []byte(obj), nil
 			}
 		}
-		return nil, errs.ResolveFailed("虎牙 stream JSON 不完整")
 	}
-	return []byte(raw), nil
+	return nil, errs.NotLive("该虎牙直播间未开播或无 stream 数据")
 }
 
 func extractJSONObject(s string) (string, bool) {
@@ -374,13 +351,9 @@ func extractJSONObject(s string) (string, bool) {
 }
 
 func buildStreamParams(antiCode, streamName string, bitRate int) (url.Values, error) {
-	q, err := url.ParseQuery(antiCode)
+	q, err := url.ParseQuery(strings.TrimPrefix(antiCode, "?"))
 	if err != nil {
-		// antiCode is already query-like without leading ?
-		q, err = url.ParseQuery(strings.TrimPrefix(antiCode, "?"))
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	fm := q.Get("fm")
 	fs := q.Get("fs")
@@ -393,7 +366,6 @@ func buildStreamParams(antiCode, streamName string, bitRate int) (url.Values, er
 		return nil, fmt.Errorf("missing fm/wsTime")
 	}
 
-	// fm is url-encoded base64
 	fmDec, err := url.QueryUnescape(fm)
 	if err != nil {
 		fmDec = fm
@@ -436,35 +408,23 @@ func md5hex(s string) string {
 }
 
 func (c *Client) tryMobile(ctx context.Context, room string) (streamURL, title, nick string, ok bool) {
-	pageURL := "https://m.huya.com/" + room
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	mobileUA := "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36"
+	text, err := c.fetchText(ctx, "https://m.huya.com/"+room, mobileUA, "https://m.huya.com/")
 	if err != nil {
 		return "", "", "", false
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", "", "", false
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return "", "", "", false
-	}
-	text := string(body)
-	// "liveLineUrl":"...." may be plain or base64
-	re := regexp.MustCompile(`"liveLineUrl"\s*:\s*"([^"]+)"`)
-	m := re.FindStringSubmatch(text)
+	m := liveLineRe.FindStringSubmatch(text)
 	if m == nil {
 		return "", "", "", false
 	}
-	line := m[1]
-	// unescape unicode/json
-	line = strings.ReplaceAll(line, `\u0026`, "&")
+	line := strings.ReplaceAll(m[1], `\u0026`, "&")
 	line = strings.ReplaceAll(line, `\/`, `/`)
 	decoded := line
-	if b, err := base64.StdEncoding.DecodeString(line); err == nil && len(b) > 0 && (b[0] == '/' || strings.Contains(string(b), "flv")) {
-		decoded = string(b)
+	if b, err := base64.StdEncoding.DecodeString(line); err == nil && len(b) > 0 {
+		s := string(b)
+		if s[0] == '/' || strings.Contains(s, "flv") || strings.Contains(s, "hls") {
+			decoded = s
+		}
 	}
 	if decoded == "" || strings.Contains(decoded, "replay") {
 		return "", "", "", false
@@ -473,20 +433,18 @@ func (c *Client) tryMobile(ctx context.Context, room string) (streamURL, title, 
 		streamURL = u
 	} else {
 		streamURL = ensureHTTPS(decoded)
-		// force flv
 		streamURL = strings.ReplaceAll(streamURL, "hls", "flv")
 		streamURL = strings.ReplaceAll(streamURL, ".m3u8", ".flv")
 	}
-	if tr := regexp.MustCompile(`"roomName"\s*:\s*"([^"]*)"`).FindStringSubmatch(text); tr != nil {
+	if tr := roomNameRe.FindStringSubmatch(text); tr != nil {
 		title = tr[1]
 	}
-	if nr := regexp.MustCompile(`"nick"\s*:\s*"([^"]*)"`).FindStringSubmatch(text); nr != nil {
+	if nr := nickRe.FindStringSubmatch(text); nr != nil {
 		nick = nr[1]
 	}
 	return streamURL, title, nick, streamURL != ""
 }
 
-// signMobileLine applies the classic liveLineUrl wsSecret algorithm.
 func signMobileLine(liveLine string) (string, error) {
 	liveLine = strings.TrimPrefix(liveLine, "https:")
 	liveLine = strings.TrimPrefix(liveLine, "http:")
@@ -498,7 +456,6 @@ func signMobileLine(liveLine string) (string, error) {
 		return ensureHTTPS(liveLine), nil
 	}
 	path, query := parts[0], parts[1]
-	// replace hls->flv
 	path = strings.ReplaceAll(path, "hls", "flv")
 	path = strings.ReplaceAll(path, ".m3u8", ".flv")
 
@@ -517,19 +474,15 @@ func signMobileLine(liveLine string) (string, error) {
 		return "", err
 	}
 	p := strings.SplitN(string(fmBytes), "_", 2)[0]
-	// stream name from path
 	seg := path
 	if i := strings.LastIndex(path, "/"); i >= 0 {
 		seg = path[i+1:]
 	}
-	seg = strings.TrimSuffix(seg, ".flv")
-	seg = strings.TrimSuffix(seg, ".m3u8")
+	seg = strings.TrimSuffix(strings.TrimSuffix(seg, ".flv"), ".m3u8")
 	seqid := strconv.FormatInt(time.Now().UnixNano()/100, 10)
 	u := "0"
-	h := strings.Join([]string{p, u, seg, seqid, wsTime}, "_")
-	wsSecret := md5hex(h)
+	wsSecret := md5hex(strings.Join([]string{p, u, seg, seqid, wsTime}, "_"))
 
-	// rebuild query: keep non-empty original trailing params loosely
 	out := url.Values{}
 	out.Set("wsSecret", wsSecret)
 	out.Set("wsTime", wsTime)
@@ -576,18 +529,4 @@ func bitrateName(br int) string {
 		return "source"
 	}
 	return strconv.Itoa(br) + "k"
-}
-
-func orDefault(s, d string) string {
-	if s == "" {
-		return d
-	}
-	return s
-}
-
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

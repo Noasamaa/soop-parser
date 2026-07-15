@@ -25,7 +25,17 @@ func TestParseRoomID(t *testing.T) {
 	if IsURL("https://www.youtube.com/watch?v=x") {
 		t.Fatal("youtube should not match bilibili")
 	}
+	if IsURL("https://www.huya.com/lck") {
+		t.Fatal("huya should not match bilibili")
+	}
 	if !IsURL("https://live.bilibili.com/6") {
 		t.Fatal("expected bilibili url")
+	}
+}
+
+func TestPickStreamsEmpty(t *testing.T) {
+	h, f := pickStreams(nil)
+	if h != "" || f != "" {
+		t.Fatal("expected empty")
 	}
 }

@@ -282,10 +282,10 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CN platforms: direct CDN by default (no server bandwidth).
-	// SOOP / YouTube still default to proxy for geo bypass.
+	// SOOP / YouTube default to proxy (geo). CN platforms always direct:
+	// their CDNs are not on the proxy allowlist and should not use server bandwidth.
 	useProxy := !isCNDirectPlatform(res.Platform)
-	if req.Proxy != nil {
+	if req.Proxy != nil && !isCNDirectPlatform(res.Platform) {
 		useProxy = *req.Proxy
 	}
 
