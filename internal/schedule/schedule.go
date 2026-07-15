@@ -12,23 +12,21 @@ import (
 	"time"
 )
 
-// Public Riot-adjacent esports API (community-documented; key is public).
+// Riot-adjacent esports API (community-documented public key).
 const (
-	esportsBase = "https://esports-api.lolesports.com/persisted/gw"
-	esportsKey  = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
-	// hide tournament schedule this long after tournament.endDate
-	hideAfterEnd = 72 * time.Hour
+	esportsBase  = "https://esports-api.lolesports.com/persisted/gw"
+	esportsKey   = "0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z"
+	hideAfterEnd = 72 * time.Hour // whole tournament end + 3 days
+	maxBody      = 4 << 20
+	maxDoneKeep  = 8 // keep only recent completed matches in payload
 )
 
-// Tracked leagues (slug → leagueId).
 var trackedLeagues = []struct {
-	ID    string
-	Slug  string
-	Label string
+	ID, Slug, Label string
 }{
-	{ID: "116838530616006090", Slug: "ewc_lol", Label: "EWC 电竞世俱杯"},
-	{ID: "98767991325878492", Slug: "msi", Label: "MSI"},
-	{ID: "98767975604431411", Slug: "worlds", Label: "Worlds"},
+	{"116838530616006090", "ewc_lol", "EWC 电竞世俱杯"},
+	{"98767991325878492", "msi", "MSI"},
+	{"98767975604431411", "worlds", "Worlds"},
 }
 
 // Team is one side of a match.
@@ -37,7 +35,7 @@ type Team struct {
 	Name   string `json:"name"`
 	Image  string `json:"image,omitempty"`
 	Wins   int    `json:"wins"`
-	Record string `json:"record,omitempty"` // e.g. 1-0 series record in stage
+	Record string `json:"record,omitempty"`
 }
 
 // Match is one scheduled series.
@@ -140,48 +138,19 @@ func (s *Service) build(ctx context.Context) (*Result, error) {
 			}
 			continue
 		}
-		// pick most recent tournament that is still visible (end+3d)
-		var pick *tournamentMeta
-		for i := range tours {
-			t := &tours[i]
-			hideAt := t.End.Add(hideAfterEnd)
-			if now.After(hideAt) {
-				continue
-			}
-			// prefer currently active or upcoming; among visible pick latest start
-			if pick == nil || t.Start.After(pick.Start) {
-				pick = t
-			}
-		}
+		pick := pickVisibleTournament(tours, now)
 		if pick == nil {
 			continue
 		}
-		matches, err := s.fetchSchedule(ctx, L.ID, L.Slug, L.Label)
+		matches, err := s.fetchSchedule(ctx, L.ID, L.Label)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
-			// still list tournament shell
 			matches = nil
 		}
-		// filter matches roughly within tournament window ±1 day
-		var filtered []Match
-		winStart := pick.Start.Add(-24 * time.Hour)
-		winEnd := pick.End.Add(48 * time.Hour)
-		for _, m := range matches {
-			if m.StartTime.Before(winStart) || m.StartTime.After(winEnd) {
-				continue
-			}
-			filtered = append(filtered, m)
-		}
-		sort.SliceStable(filtered, func(i, j int) bool {
-			return filtered[i].StartTime.Before(filtered[j].StartTime)
-		})
-		// skip empty far-future shells (e.g. Worlds with no events in window yet)
-		inWindow := !now.Before(pick.Start.Add(-24*time.Hour)) && !now.After(pick.End.Add(hideAfterEnd))
-		if len(filtered) == 0 && !inWindow {
-			continue
-		}
+		filtered := filterAndTrimMatches(matches, pick)
+		// skip empty far-future shells
 		if len(filtered) == 0 && now.Before(pick.Start) {
 			continue
 		}
@@ -201,7 +170,6 @@ func (s *Service) build(ctx context.Context) (*Result, error) {
 	if len(out) == 0 && firstErr != nil {
 		return nil, firstErr
 	}
-	// active leagues first (more remaining matches / later end)
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].EndDate.After(out[j].EndDate)
 	})
@@ -215,16 +183,58 @@ type tournamentMeta struct {
 	End   time.Time
 }
 
+func pickVisibleTournament(tours []tournamentMeta, now time.Time) *tournamentMeta {
+	var pick *tournamentMeta
+	for i := range tours {
+		t := &tours[i]
+		if now.After(t.End.Add(hideAfterEnd)) {
+			continue
+		}
+		if pick == nil || t.Start.After(pick.Start) {
+			pick = t
+		}
+	}
+	return pick
+}
+
+func filterAndTrimMatches(matches []Match, pick *tournamentMeta) []Match {
+	winStart := pick.Start.Add(-24 * time.Hour)
+	winEnd := pick.End.Add(48 * time.Hour)
+	var live, soon, done []Match
+	for _, m := range matches {
+		if m.StartTime.Before(winStart) || m.StartTime.After(winEnd) {
+			continue
+		}
+		switch m.State {
+		case "inProgress":
+			live = append(live, m)
+		case "unstarted":
+			soon = append(soon, m)
+		default:
+			done = append(done, m)
+		}
+	}
+	// keep only the most recent completed rows to avoid dumping full history
+	if len(done) > maxDoneKeep {
+		done = done[len(done)-maxDoneKeep:]
+	}
+	out := make([]Match, 0, len(live)+len(soon)+len(done))
+	out = append(out, live...)
+	out = append(out, soon...)
+	out = append(out, done...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].StartTime.Before(out[j].StartTime)
+	})
+	return out
+}
+
 func (s *Service) fetchTournaments(ctx context.Context, leagueID string) ([]tournamentMeta, error) {
 	u := fmt.Sprintf("%s/getTournamentsForLeague?hl=en-US&leagueId=%s", esportsBase, leagueID)
 	var resp struct {
 		Data struct {
 			Leagues []struct {
 				Tournaments []struct {
-					ID        string `json:"id"`
-					Slug      string `json:"slug"`
-					StartDate string `json:"startDate"`
-					EndDate   string `json:"endDate"`
+					ID, Slug, StartDate, EndDate string
 				} `json:"tournaments"`
 			} `json:"leagues"`
 		} `json:"data"`
@@ -240,7 +250,6 @@ func (s *Service) fetchTournaments(ctx context.Context, leagueID string) ([]tour
 			if err1 != nil || err2 != nil {
 				continue
 			}
-			// end of endDate day UTC
 			end = end.Add(23*time.Hour + 59*time.Minute)
 			out = append(out, tournamentMeta{ID: t.ID, Slug: t.Slug, Start: start, End: end})
 		}
@@ -248,7 +257,7 @@ func (s *Service) fetchTournaments(ctx context.Context, leagueID string) ([]tour
 	return out, nil
 }
 
-func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueSlug, leagueLabel string) ([]Match, error) {
+func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueLabel string) ([]Match, error) {
 	u := fmt.Sprintf("%s/getSchedule?hl=en-US&leagueId=%s", esportsBase, leagueID)
 	var resp struct {
 		Data struct {
@@ -261,20 +270,15 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueSlug, leagu
 					Match     *struct {
 						ID       string `json:"id"`
 						Strategy struct {
-							Type  string `json:"type"`
-							Count int    `json:"count"`
+							Count int `json:"count"`
 						} `json:"strategy"`
 						Teams []struct {
-							Name   string `json:"name"`
-							Code   string `json:"code"`
-							Image  string `json:"image"`
-							Result *struct {
-								GameWins int    `json:"gameWins"`
-								Outcome  string `json:"outcome"`
+							Name, Code, Image string
+							Result            *struct {
+								GameWins int `json:"gameWins"`
 							} `json:"result"`
 							Record *struct {
-								Wins   int `json:"wins"`
-								Losses int `json:"losses"`
+								Wins, Losses int
 							} `json:"record"`
 						} `json:"teams"`
 					} `json:"match"`
@@ -293,7 +297,6 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueSlug, leagu
 		if e.Match == nil || len(e.Match.Teams) == 0 {
 			continue
 		}
-		// skip placeholder events without team codes
 		hasCode := false
 		for _, t := range e.Match.Teams {
 			if t.Code != "" {
@@ -326,22 +329,14 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueSlug, leagu
 				rec = fmt.Sprintf("%d-%d", t.Record.Wins, t.Record.Losses)
 			}
 			teams = append(teams, Team{
-				Code:   t.Code,
-				Name:   t.Name,
-				Image:  ensureHTTPS(t.Image),
-				Wins:   wins,
-				Record: rec,
+				Code: t.Code, Name: t.Name, Image: ensureHTTPS(t.Image),
+				Wins: wins, Record: rec,
 			})
 		}
 		out = append(out, Match{
-			ID:        e.Match.ID,
-			StartTime: st.UTC(),
-			State:     e.State,
-			Block:     e.BlockName,
-			BO:        bo,
-			Teams:     teams,
-			League:    leagueLabel,
-			LeagueID:  leagueID,
+			ID: e.Match.ID, StartTime: st.UTC(), State: e.State,
+			Block: e.BlockName, BO: bo, Teams: teams,
+			League: leagueLabel, LeagueID: leagueID,
 		})
 	}
 	return out, nil
@@ -360,7 +355,7 @@ func (s *Service) getJSON(ctx context.Context, rawURL string, dest any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
 		return err
 	}
@@ -375,7 +370,6 @@ func parseDay(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty date")
 	}
-	// "2026-07-14" or RFC3339
 	if t, err := time.Parse("2006-01-02", s); err == nil {
 		return t.UTC(), nil
 	}

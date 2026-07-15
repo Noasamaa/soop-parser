@@ -539,7 +539,7 @@
           btn.classList.add("active");
           const a = teams[0]?.code || teams[0]?.name || "";
           const b = teams[1]?.code || teams[1]?.name || "";
-          loadHupu(a, b, m);
+          loadHupu(a, b);
         });
         list.appendChild(btn);
       });
@@ -572,18 +572,19 @@
     }
   }
 
-  async function loadHupu(teamA, teamB, match) {
+  async function loadHupu(teamA, teamB) {
     if (!hupuPanel) return;
+    if (!teamA || !teamB) return;
     hupuPanel.classList.remove("hidden");
     hupuPanel.innerHTML = `<h4>虎扑评分 · ${esc(teamA)} vs ${esc(teamB)}</h4><p class="hupu-msg">拉取评分与热评中…</p>`;
     try {
       const q = new URLSearchParams({ team_a: teamA, team_b: teamB });
       const res = await fetch(withToken("/api/hupu/rating?" + q.toString()), { headers: authHeaders() });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       const rating = data.rating || data;
       if (!rating || rating.available === false) {
-        const msg = rating?.message || data.message || "暂无评分";
-        const link = rating?.source_url || "";
+        const msg = (rating && rating.message) || data.message || "暂无评分";
+        const link = (rating && rating.source_url) || "";
         hupuPanel.innerHTML = `<h4>虎扑评分 · ${esc(teamA)} vs ${esc(teamB)}</h4>
           <p class="hupu-msg">${esc(msg)}</p>
           ${link ? `<a class="hupu-link" href="${esc(link)}" target="_blank" rel="noopener">去虎扑搜索</a>` : ""}`;

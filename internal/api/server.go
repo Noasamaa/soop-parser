@@ -281,7 +281,8 @@ func (s *Server) handleHupuRating(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	// Hupu is best-effort with short per-request timeouts; keep handler tight.
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 	var (
 		rating *hupu.MatchRating
@@ -293,13 +294,16 @@ func (s *Server) handleHupuRating(w http.ResponseWriter, r *http.Request) {
 		rating, err = s.hupu.RatingForTeams(ctx, teamA, teamB)
 	}
 	if err != nil {
-		// still return structured payload when possible
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":        true,
-			"available": false,
-			"message":   err.Error(),
-			"team_a":    teamA,
-			"team_b":    teamB,
+			"ok": true,
+			"rating": map[string]any{
+				"available":  false,
+				"message":    err.Error(),
+				"title":      strings.TrimSpace(teamA + " vs " + teamB),
+				"home":       teamA,
+				"away":       teamB,
+				"source_url": "https://m.hupu.com/bbs/search?q=" + url.QueryEscape(teamA+" vs "+teamB+" 评分"),
+			},
 		})
 		return
 	}
