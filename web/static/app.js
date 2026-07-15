@@ -23,9 +23,13 @@
   const copyRow = $("copyRow");
   const playUrlOut = $("playUrlOut");
   const copyBtn = $("copyBtn");
+  const catalogEl = $("catalog");
+  const catalogMeta = $("catalogMeta");
+  const catalogRefresh = $("catalogRefresh");
 
   let hls = null;
   let authRequired = false;
+  let catalogTimer = null;
 
   // 台湾英雄联盟中文解说常用源（频道页，开播时自动取当前场次）
   const DEFAULT_PRESETS = [
@@ -315,6 +319,139 @@
     });
   }
 
+  function setCatalogActive(id) {
+    document.querySelectorAll(".cat-card").forEach((b) => {
+      b.classList.toggle("active", b.dataset.id === id);
+    });
+  }
+
+  function esc(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function platBadge(platform) {
+    switch ((platform || "").toLowerCase()) {
+      case "huya":
+        return "虎牙";
+      case "bilibili":
+        return "B站";
+      case "soop":
+        return "SOOP";
+      case "youtube":
+        return "YT";
+      default:
+        return (platform || "").toUpperCase();
+    }
+  }
+
+  function statusBadge(item) {
+    if (item.is_replay) return { cls: "replay", text: "重播" };
+    if (item.is_live) return { cls: "live", text: "LIVE" };
+    return { cls: "off", text: "未开播" };
+  }
+
+  function renderCatalog(data) {
+    if (!catalogEl) return;
+    catalogEl.innerHTML = "";
+    const groups = data.groups || [];
+    if (!groups.length) {
+      catalogMeta.textContent = "暂无目录数据";
+      return;
+    }
+
+    let liveN = 0;
+    let total = 0;
+    groups.forEach((g) => {
+      const items = g.items || [];
+      total += items.length;
+      items.forEach((it) => {
+        if (it.is_live && !it.is_replay) liveN += 1;
+      });
+
+      const section = document.createElement("section");
+      section.className = "cat-group";
+      const h = document.createElement("h3");
+      h.className = "cat-group-title";
+      h.textContent = g.title || g.id;
+      section.appendChild(h);
+
+      const grid = document.createElement("div");
+      grid.className = "cat-grid";
+
+      items.forEach((item) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "cat-card" + (item.is_live && !item.is_replay ? "" : " offline");
+        btn.dataset.id = item.id;
+        btn.dataset.url = item.url;
+        btn.title = item.url;
+
+        const st = statusBadge(item);
+        const cover = item.cover
+          ? `<img class="cat-cover" src="${esc(item.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+          : `<div class="cat-cover placeholder">${esc(platBadge(item.platform))}</div>`;
+
+        btn.innerHTML = `
+          ${cover}
+          <span class="cat-badge ${st.cls}">${esc(st.text)}</span>
+          <span class="cat-plat">${esc(platBadge(item.platform))}</span>
+          <div class="cat-body">
+            <div class="cat-role">${esc(item.role || "")}</div>
+            <div class="cat-title">${esc(item.title || item.label || "未命名")}</div>
+            <div class="cat-author">${esc(item.author || item.label || "")}</div>
+          </div>
+        `;
+        btn.addEventListener("click", () => {
+          if (!item.url) return;
+          urlInput.value = item.url;
+          setCatalogActive(item.id);
+          localStorage.setItem(PRESET_KEY, item.id);
+          if (item.is_replay) {
+            showError("该房间当前是回放/重播，播放器里容易卡缓冲。已填入链接，可手动解析试试。");
+          } else if (!item.is_live && item.platform !== "soop" && item.platform !== "youtube") {
+            showError("标记为未开播。仍可解析试试（状态有约 45s 缓存）。");
+          } else {
+            clearError();
+          }
+          resolve();
+        });
+        grid.appendChild(btn);
+      });
+
+      section.appendChild(grid);
+      catalogEl.appendChild(section);
+    });
+
+    const ts = data.updated_at ? new Date(data.updated_at).toLocaleTimeString() : "";
+    catalogMeta.textContent = `共 ${total} 路 · LIVE ${liveN} · 封面/标题实时拉取${ts ? " · 更新 " + ts : ""}`;
+  }
+
+  async function loadCatalog() {
+    if (!catalogEl) return;
+    try {
+      catalogMeta.textContent = "加载实时封面 / 标题…";
+      const res = await fetch(withToken("/api/catalog"), { headers: authHeaders() });
+      if (res.status === 401) {
+        authRequired = true;
+        tokenWrap.classList.remove("hidden");
+        catalogMeta.textContent = "需要访问令牌";
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok || data.ok === false) {
+        catalogMeta.textContent = data.message || "目录加载失败";
+        return;
+      }
+      renderCatalog(data);
+    } catch (err) {
+      catalogMeta.textContent = "目录加载失败（服务可能未启动）";
+    }
+  }
+
   function renderPresets(list) {
     const el = $("presets");
     if (!el) return;
@@ -383,5 +520,12 @@
     setPresetActive(primary.id);
   }
 
+  if (catalogRefresh) {
+    catalogRefresh.addEventListener("click", () => loadCatalog());
+  }
+
   loadConfig();
+  loadCatalog();
+  // refresh live covers/titles periodically
+  catalogTimer = setInterval(loadCatalog, 90_000);
 })();

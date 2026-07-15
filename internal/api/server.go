@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Noasamaa/soop-parser/internal/bilibili"
+	"github.com/Noasamaa/soop-parser/internal/catalog"
 	"github.com/Noasamaa/soop-parser/internal/config"
 	"github.com/Noasamaa/soop-parser/internal/errs"
 	"github.com/Noasamaa/soop-parser/internal/huya"
@@ -32,6 +33,7 @@ type Server struct {
 	youtube  *youtube.Client
 	bilibili *bilibili.Client
 	huya     *huya.Client
+	catalog  *catalog.Service
 	upstream *http.Client
 	static   http.Handler
 	mux      *http.ServeMux
@@ -65,6 +67,7 @@ func New(cfg config.Config, staticFS http.FileSystem) *Server {
 		youtube:  youtube.NewClient(cfg.HTTPTimeout, cfg.YouTubeCookiesFile),
 		bilibili: bilibili.NewClient(client),
 		huya:     huya.NewClient(client),
+		catalog:  catalog.New(client),
 		upstream: streamClient,
 		mux:      http.NewServeMux(),
 	}
@@ -80,6 +83,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("HEAD /health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/config", s.withAuth(s.handleConfig))
 	s.mux.HandleFunc("HEAD /api/config", s.withAuth(s.handleConfig))
+	s.mux.HandleFunc("GET /api/catalog", s.withAuth(s.handleCatalog))
+	s.mux.HandleFunc("HEAD /api/catalog", s.withAuth(s.handleCatalog))
 	s.mux.HandleFunc("POST /api/resolve", s.withAuth(s.handleResolve))
 	s.mux.HandleFunc("GET /api/hls/{token}/playlist.m3u8", s.withAuth(s.handlePlaylist))
 	s.mux.HandleFunc("HEAD /api/hls/{token}/playlist.m3u8", s.withAuth(s.handlePlaylistHEAD))
@@ -186,7 +191,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// defaultPresets are Taiwan LoL Chinese commentary shortcuts.
+// defaultPresets are Taiwan LoL Chinese commentary shortcuts (legacy pill UI).
 func defaultPresets() []map[string]any {
 	return []map[string]any{
 		{
@@ -215,6 +220,25 @@ func defaultPresets() []map[string]any {
 			"note": "YouTube LoLEsportsTW / LCP 官方",
 		},
 	}
+}
+
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	res, err := s.catalog.Get(ctx)
+	if err != nil {
+		writeErr(w, errs.ResolveFailed("赛事目录加载失败: "+err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"updated_at": res.UpdatedAt,
+		"groups":     res.Groups,
+	})
 }
 
 func (s *Server) publicBase(r *http.Request) string {
