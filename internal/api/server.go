@@ -13,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Noasamaa/soop-parser/internal/bilibili"
 	"github.com/Noasamaa/soop-parser/internal/config"
 	"github.com/Noasamaa/soop-parser/internal/errs"
+	"github.com/Noasamaa/soop-parser/internal/huya"
 	"github.com/Noasamaa/soop-parser/internal/model"
 	"github.com/Noasamaa/soop-parser/internal/proxy"
 	"github.com/Noasamaa/soop-parser/internal/session"
@@ -28,6 +30,8 @@ type Server struct {
 	sessions *session.Store
 	soop     *soop.Client
 	youtube  *youtube.Client
+	bilibili *bilibili.Client
+	huya     *huya.Client
 	upstream *http.Client
 	static   http.Handler
 	mux      *http.ServeMux
@@ -59,6 +63,8 @@ func New(cfg config.Config, staticFS http.FileSystem) *Server {
 		sessions: session.NewStore(cfg.PlayTokenTTL, cfg.MaxSessions),
 		soop:     soop.NewClient(client, cfg.SOOPUsername, cfg.SOOPPassword),
 		youtube:  youtube.NewClient(cfg.HTTPTimeout, cfg.YouTubeCookiesFile),
+		bilibili: bilibili.NewClient(client),
+		huya:     huya.NewClient(client),
 		upstream: streamClient,
 		mux:      http.NewServeMux(),
 	}
@@ -153,8 +159,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "service": "live-parser", "platforms": []string{"soop", "youtube"}, "engine": "go",
+		"ok": true, "service": "live-parser", "platforms": supportedPlatforms(), "engine": "go",
 	})
+}
+
+func supportedPlatforms() []string {
+	return []string{"soop", "youtube", "bilibili", "huya"}
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -167,10 +177,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"login_configured":           s.cfg.SOOPUsername != "" && s.cfg.SOOPPassword != "",
 		"youtube_cookies_configured": s.cfg.YouTubeCookiesFile != "",
 		"play_token_ttl":             int(s.cfg.PlayTokenTTL.Seconds()),
-		"platforms":                  []string{"soop", "youtube"},
+		"platforms":                  supportedPlatforms(),
 		"public_base_url":            s.publicBase(r),
 		"engine":                     "go",
 		"yt_dlp_hint":                "yt-dlp CLI + node (EJS)",
+		"cn_direct_default":          true,
 		"presets":                    defaultPresets(),
 	})
 }
@@ -245,10 +256,6 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "code": "bad_request", "message": "无效 JSON"})
 		return
 	}
-	useProxy := true
-	if req.Proxy != nil {
-		useProxy = *req.Proxy
-	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.HTTPTimeout+60*time.Second)
 	defer cancel()
@@ -262,13 +269,24 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		res, err = s.youtube.Resolve(ctx, raw)
 	case isSOOPURL(raw):
 		res, err = s.soop.Resolve(ctx, raw, req.StreamPassword)
+	case bilibili.IsURL(raw):
+		res, err = s.bilibili.Resolve(ctx, raw)
+	case huya.IsURL(raw):
+		res, err = s.huya.Resolve(ctx, raw)
 	default:
-		writeErr(w, errs.InvalidURL("无法识别链接。支持 SOOP play.sooplive.com 或 YouTube URL"))
+		writeErr(w, errs.InvalidURL("无法识别链接。支持 SOOP / YouTube / Bilibili / 虎牙"))
 		return
 	}
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+
+	// CN platforms: direct CDN by default (no server bandwidth).
+	// SOOP / YouTube still default to proxy for geo bypass.
+	useProxy := !isCNDirectPlatform(res.Platform)
+	if req.Proxy != nil {
+		useProxy = *req.Proxy
 	}
 
 	base := s.publicBase(r)
@@ -302,8 +320,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		"title":              res.Title,
 		"author":             res.Author,
 		"password_protected": res.PasswordProtected,
+		"proxied":            useProxy,
 		"qualities":          outQ,
 	})
+}
+
+func isCNDirectPlatform(platform string) bool {
+	switch platform {
+	case "bilibili", "huya":
+		return true
+	default:
+		return false
+	}
 }
 
 func isSOOPURL(raw string) bool {

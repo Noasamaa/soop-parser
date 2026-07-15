@@ -123,6 +123,15 @@
     playUrlOut.value = url;
   }
 
+  function looksLikeCNPlatform(url) {
+    const u = (url || "").toLowerCase();
+    return (
+      u.includes("bilibili.com") ||
+      u.includes("huya.com") ||
+      /^\d{1,12}$/.test(u.trim())
+    );
+  }
+
   function playUrl(url, protocol) {
     destroyPlayer();
     let finalUrl = url;
@@ -133,9 +142,21 @@
       finalUrl = withToken(finalUrl);
     }
     setPlayUrlOutput(finalUrl);
-    playHint.textContent = `播放中（经本站代理）：${finalUrl}`;
+    const viaProxy = finalUrl.includes("/api/hls/") || finalUrl.includes("/api/media/");
+    const isFlv =
+      protocol === "progressive" ||
+      /\.flv(\?|$)/i.test(finalUrl) ||
+      finalUrl.includes(".flv?");
+    if (viaProxy) {
+      playHint.textContent = `播放中（经本站代理）：${finalUrl}`;
+    } else if (isFlv) {
+      playHint.textContent = `直连 FLV（浏览器通常无法播）：可复制到 PotPlayer / VLC。${finalUrl}`;
+    } else {
+      playHint.textContent = `播放中（直连 CDN）：${finalUrl}`;
+    }
 
     if (!isHlsUrl(finalUrl, protocol)) {
+      // FLV / progressive: still set src so users see attempt; real play often needs PotPlayer
       player.src = finalUrl;
       player.play().catch(() => {});
       return;
@@ -248,8 +269,14 @@
     clearError();
     const url = urlInput.value.trim();
     if (!url) {
-      showError("请输入 SOOP 或 YouTube 链接");
+      showError("请输入 SOOP / YouTube / B站 / 虎牙 链接");
       return;
+    }
+
+    // B站/虎牙默认不代理（直连国内 CDN，不占服务器带宽）
+    let proxy = proxyToggle.checked;
+    if (looksLikeCNPlatform(url) && proxyToggle.dataset.userTouched !== "1") {
+      proxy = false;
     }
 
     resolveBtn.disabled = true;
@@ -264,7 +291,7 @@
         body: JSON.stringify({
           url,
           stream_password: pwdInput.value,
-          proxy: proxyToggle.checked,
+          proxy,
         }),
       });
 
@@ -274,6 +301,10 @@
         const code = data.code ? `[${data.code}] ` : "";
         showError(`${code}${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
         return;
+      }
+      if (data.proxied === false) {
+        // reflect actual backend choice in UI without forcing permanent state
+        proxyToggle.checked = false;
       }
       renderResult(data);
     } catch (err) {
@@ -312,9 +343,19 @@
     });
   }
 
+  proxyToggle.addEventListener("change", () => {
+    proxyToggle.dataset.userTouched = "1";
+  });
+
   resolveBtn.addEventListener("click", resolve);
   urlInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") resolve();
+  });
+  urlInput.addEventListener("change", () => {
+    // when switching to CN link and user hasn't forced proxy, hint uncheck
+    if (looksLikeCNPlatform(urlInput.value) && proxyToggle.dataset.userTouched !== "1") {
+      proxyToggle.checked = false;
+    }
   });
   copyBtn.addEventListener("click", async () => {
     const v = playUrlOut.value;

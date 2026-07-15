@@ -1,6 +1,6 @@
-# 直播解析（SOOP + YouTube · Go）
+# 直播解析（SOOP / YouTube / B站 / 虎牙 · Go）
 
-自托管直播/点播解析 + **HLS 反向代理**。浏览器与 PotPlayer 只访问你的域名，由服务器出口 IP 拉 SOOP / YouTube。
+自托管直播解析。**SOOP / YouTube** 走服务器 HLS 反向代理（绕地区限制）；**B站 / 虎牙** 默认只解析、返回直连 CDN 地址（**不占服务器带宽**）。
 
 > 仅供个人自用。勿公开分享代理链接。
 
@@ -14,8 +14,10 @@
 
 ## 功能
 
-- SOOP 直播多清晰度 HLS
-- YouTube 直播 / 部分点播（HLS 或 progressive）
+- SOOP 直播多清晰度 HLS（可代理）
+- YouTube 直播 / 部分点播（可代理）
+- **Bilibili** 直播多清晰度 HLS / FLV（默认直连）
+- **虎牙** 直播多码率 FLV（默认直连，建议 PotPlayer）
 - 代理播放（绝对 URL，便于 PotPlayer）
 - HTTP HEAD 兼容（不拉完整分片）
 - 会话上限 + 滑动 TTL
@@ -53,7 +55,8 @@ docker compose up -d --build
 
 ## API
 
-- `POST /api/resolve` `{"url":"...","proxy":true}`
+- `POST /api/resolve` `{"url":"...","proxy":true}`  
+  - `proxy` 可选；B站/虎牙默认 `false`（直连），SOOP/YouTube 默认 `true`
 - `GET /api/hls/{token}/playlist.m3u8`
 - `GET /api/hls/{token}/proxy?u=...`（仅白名单 host）
 - `GET /api/media/{token}`
