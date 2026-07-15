@@ -171,7 +171,39 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"public_base_url":            s.publicBase(r),
 		"engine":                     "go",
 		"yt_dlp_hint":                "yt-dlp CLI + node (EJS)",
+		"presets":                    defaultPresets(),
 	})
+}
+
+// defaultPresets are Taiwan LoL Chinese commentary shortcuts.
+func defaultPresets() []map[string]any {
+	return []map[string]any{
+		{
+			"id": "loltw", "label": "台灣中文", "badge": "SOOP", "primary": true,
+			"url":  "https://play.sooplive.com/loltw",
+			"note": "SOOP 台灣中文賽事轉播（EWC / 國際賽等）",
+		},
+		{
+			"id": "lckcarry", "label": "LCK 中文", "badge": "SOOP",
+			"url":  "https://play.sooplive.com/lckcarry",
+			"note": "LCK 中文轉播（鍇睿 / SOOP）",
+		},
+		{
+			"id": "carrylck", "label": "LCK 中文·備", "badge": "SOOP",
+			"url":  "https://play.sooplive.com/carrylck",
+			"note": "LCK 中文備用頻道 ID",
+		},
+		{
+			"id": "yt-lckcarry", "label": "LCK-Carry", "badge": "YT",
+			"url":  "https://www.youtube.com/@LCKCarry/live",
+			"note": "YouTube LCK 中文（有直播時）",
+		},
+		{
+			"id": "yt-lcp", "label": "LCP / 太平洋", "badge": "YT",
+			"url":  "https://www.youtube.com/@lolesportstw/live",
+			"note": "YouTube LoLEsportsTW / LCP 官方",
+		},
+	}
 }
 
 func (s *Server) publicBase(r *http.Request) string {

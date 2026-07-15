@@ -100,6 +100,45 @@ html, body {
   margin-bottom: 8px;
 }
 
+.presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.preset-btn {
+  border: 1px solid var(--border);
+  background: #182231;
+  color: #c6d4e6;
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: auto;
+  white-space: nowrap;
+  transition: border-color 0.12s ease, background 0.12s ease, transform 0.12s ease;
+}
+
+.preset-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  transform: translateY(-1px);
+}
+
+.preset-btn.active {
+  background: linear-gradient(135deg, #1d4ed8, #0e7490);
+  border-color: transparent;
+  color: #fff;
+}
+
+.preset-btn .badge {
+  opacity: 0.75;
+  font-weight: 500;
+  margin-left: 4px;
+  font-size: 0.75rem;
+}
+
 .field-label.tight {
   margin-top: 12px;
 }

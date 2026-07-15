@@ -27,7 +27,43 @@
   let hls = null;
   let authRequired = false;
 
+  // 台湾英雄联盟中文解说常用源（频道页，开播时自动取当前场次）
+  const DEFAULT_PRESETS = [
+    {
+      id: "loltw",
+      label: "台灣中文",
+      badge: "SOOP",
+      url: "https://play.sooplive.com/loltw",
+      primary: true,
+    },
+    {
+      id: "lckcarry",
+      label: "LCK 中文",
+      badge: "SOOP",
+      url: "https://play.sooplive.com/lckcarry",
+    },
+    {
+      id: "carrylck",
+      label: "LCK 中文·備",
+      badge: "SOOP",
+      url: "https://play.sooplive.com/carrylck",
+    },
+    {
+      id: "yt-lckcarry",
+      label: "LCK-Carry",
+      badge: "YT",
+      url: "https://www.youtube.com/@LCKCarry/live",
+    },
+    {
+      id: "yt-lcp",
+      label: "LCP / 太平洋",
+      badge: "YT",
+      url: "https://www.youtube.com/@lolesportstw/live",
+    },
+  ];
+
   const TOKEN_KEY = "live_parser_access_token";
+  const PRESET_KEY = "live_parser_last_preset";
   const saved = localStorage.getItem(TOKEN_KEY);
   if (saved) tokenInput.value = saved;
 
@@ -188,6 +224,14 @@
       if (authRequired) tokenWrap.classList.remove("hidden");
       else tokenWrap.classList.add("hidden");
 
+      if (Array.isArray(data.presets) && data.presets.length) {
+        renderPresets(data.presets);
+        // re-apply active highlight after server presets replace DOM
+        const cur = urlInput.value.trim();
+        const hit = data.presets.find((p) => p.url === cur);
+        if (hit) setPresetActive(hit.id);
+      }
+
       const parts = [];
       parts.push((data.platforms || []).join(" + ") || "soop");
       if (data.engine) parts.push(`引擎 ${data.engine}`);
@@ -240,6 +284,34 @@
     }
   }
 
+  function setPresetActive(id) {
+    document.querySelectorAll(".preset-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.id === id);
+    });
+  }
+
+  function renderPresets(list) {
+    const el = $("presets");
+    if (!el) return;
+    el.innerHTML = "";
+    list.forEach((p) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "preset-btn";
+      btn.dataset.id = p.id;
+      btn.dataset.url = p.url;
+      btn.innerHTML = `${p.label}<span class="badge">${p.badge || ""}</span>`;
+      btn.title = p.url;
+      btn.addEventListener("click", () => {
+        urlInput.value = p.url;
+        setPresetActive(p.id);
+        localStorage.setItem(PRESET_KEY, p.id);
+        resolve();
+      });
+      el.appendChild(btn);
+    });
+  }
+
   resolveBtn.addEventListener("click", resolve);
   urlInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") resolve();
@@ -260,10 +332,25 @@
   });
 
   const params = new URLSearchParams(location.search);
-  if (params.get("url")) urlInput.value = params.get("url");
   if (params.get("token")) {
     tokenInput.value = params.get("token");
     localStorage.setItem(TOKEN_KEY, params.get("token"));
+  }
+
+  renderPresets(DEFAULT_PRESETS);
+
+  // 默认：URL 参数 > 上次预设 > 台灣中文 loltw
+  const primary = DEFAULT_PRESETS.find((p) => p.primary) || DEFAULT_PRESETS[0];
+  const lastId = localStorage.getItem(PRESET_KEY);
+  const last = DEFAULT_PRESETS.find((p) => p.id === lastId);
+  if (params.get("url")) {
+    urlInput.value = params.get("url");
+  } else if (last) {
+    urlInput.value = last.url;
+    setPresetActive(last.id);
+  } else if (primary) {
+    urlInput.value = primary.url;
+    setPresetActive(primary.id);
   }
 
   loadConfig();
