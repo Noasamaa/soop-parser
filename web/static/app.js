@@ -4,6 +4,7 @@
   const urlInput = $("urlInput");
   const pwdInput = $("pwdInput");
   const tokenInput = $("tokenInput");
+  const tokenWrap = $("tokenWrap");
   const proxyToggle = $("proxyToggle");
   const resolveBtn = $("resolveBtn");
   const errorCard = $("errorCard");
@@ -24,8 +25,9 @@
   const copyBtn = $("copyBtn");
 
   let hls = null;
+  let authRequired = false;
 
-  const TOKEN_KEY = "soop_parser_access_token";
+  const TOKEN_KEY = "live_parser_access_token";
   const saved = localStorage.getItem(TOKEN_KEY);
   if (saved) tokenInput.value = saved;
 
@@ -43,6 +45,7 @@
   }
 
   function withToken(url) {
+    if (!authRequired) return url;
     const t = tokenInput.value.trim();
     if (!t) return url;
     const sep = url.includes("?") ? "&" : "?";
@@ -86,23 +89,17 @@
 
   function playUrl(url, protocol) {
     destroyPlayer();
-    // play_url from API is already absolute + may already include ?token=
     let finalUrl = url;
-    if (!/^https?:\/\//i.test(finalUrl) && !finalUrl.startsWith("/")) {
-      finalUrl = url;
-    }
-    // relative fallback for old responses
     if (finalUrl.startsWith("/")) {
       finalUrl = `${location.origin}${finalUrl}`;
     }
-    if (!/[?&]token=/.test(finalUrl)) {
+    if (authRequired && !/[?&]token=/.test(finalUrl)) {
       finalUrl = withToken(finalUrl);
     }
     setPlayUrlOutput(finalUrl);
     playHint.textContent = `播放中（经本站代理）：${finalUrl}`;
 
     if (!isHlsUrl(finalUrl, protocol)) {
-      // Progressive mp4/webm
       player.src = finalUrl;
       player.play().catch(() => {});
       return;
@@ -119,6 +116,7 @@
         enableWorker: true,
         lowLatencyMode: true,
         xhrSetup: (xhr) => {
+          if (!authRequired) return;
           const t = tokenInput.value.trim();
           if (t) xhr.setRequestHeader("X-Access-Token", t);
         },
@@ -136,7 +134,7 @@
       return;
     }
 
-    showError("当前浏览器不支持 HLS 播放，请使用 Chrome / Edge / Safari，或把地址复制到 VLC。");
+    showError("当前浏览器不支持 HLS 播放，请使用 Chrome / Edge / Safari，或把地址复制到 VLC / PotPlayer。");
   }
 
   function renderResult(data) {
@@ -149,14 +147,13 @@
     bnoTag.textContent = data.bno ? `视频 ${data.bno}` : "";
 
     qualitiesEl.innerHTML = "";
-    const currentQualities = data.qualities || [];
-
-    if (!currentQualities.length) {
+    const list = data.qualities || [];
+    if (!list.length) {
       playHint.textContent = "没有可用清晰度";
       return;
     }
 
-    currentQualities.forEach((q, idx) => {
+    list.forEach((q, idx) => {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "ghost";
@@ -164,13 +161,13 @@
       btn.addEventListener("click", () => {
         [...qualitiesEl.querySelectorAll("button")].forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
-        const url = q.play_url || q.direct_url;
-        if (!url) {
+        const u = q.play_url || q.direct_url;
+        if (!u) {
           showError("该清晰度没有可播放地址");
           return;
         }
         clearError();
-        playUrl(url, q.protocol || "hls");
+        playUrl(u, q.protocol || "hls");
       });
       qualitiesEl.appendChild(btn);
       if (idx === 0) btn.click();
@@ -181,16 +178,21 @@
     try {
       const res = await fetch(withToken("/api/config"), { headers: authHeaders() });
       if (res.status === 401) {
+        authRequired = true;
+        tokenWrap.classList.remove("hidden");
         configMeta.textContent = "需要访问令牌才能使用";
         return;
       }
       const data = await res.json();
+      authRequired = !!data.auth_required;
+      if (authRequired) tokenWrap.classList.remove("hidden");
+      else tokenWrap.classList.add("hidden");
+
       const parts = [];
       parts.push((data.platforms || []).join(" + ") || "soop");
+      if (data.engine) parts.push(`引擎 ${data.engine}`);
       if (data.public_base_url) parts.push(`公网: ${data.public_base_url}`);
-      parts.push(data.auth_required ? "已启用访问令牌" : "未启用访问令牌");
-      parts.push(data.login_configured ? "SOOP 已登录配置" : "SOOP 未配置登录");
-      parts.push(data.youtube_cookies_configured ? "YT cookies 已配置" : "YT cookies 未配置");
+      parts.push(authRequired ? "已启用访问令牌" : "未启用访问令牌");
       parts.push(`会话 ${data.play_token_ttl}s`);
       configMeta.innerHTML = parts.join("<br/>");
     } catch {
@@ -229,7 +231,6 @@
         showError(`${code}${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
         return;
       }
-
       renderResult(data);
     } catch (err) {
       showError(`网络错误：${err.message || err}`);

@@ -14,7 +14,7 @@
         <span class="logo">LIVE</span>
         <div>
           <h1>直播解析</h1>
-          <p class="sub">SOOP · YouTube · 自托管代理 · 个人使用</p>
+          <p class="sub">SOOP · YouTube · Go 代理 · 个人使用</p>
         </div>
       </div>
       <div class="header-meta" id="configMeta">加载配置中…</div>
@@ -26,7 +26,7 @@
         <input
           id="urlInput"
           type="url"
-          placeholder="SOOP 或 YouTube 链接，例如 https://www.youtube.com/watch?v=… 或 play.sooplive.com/…"
+          placeholder="SOOP 或 YouTube 链接"
           autocomplete="off"
           spellcheck="false"
         />
@@ -36,12 +36,14 @@
       <div class="options">
         <label class="check">
           <input type="checkbox" id="proxyToggle" checked />
-          代理播放（推荐：用服务器 IP 拉流，本地无需 VPN）
+          代理播放（用服务器 IP 拉流，本地无需 VPN）
         </label>
         <label class="field-label tight" for="pwdInput">SOOP 直播密码（可选）</label>
         <input id="pwdInput" type="password" placeholder="仅 SOOP 密码房需要" autocomplete="off" />
-        <label class="field-label tight" for="tokenInput">访问令牌（若服务器启用了 ACCESS_TOKEN）</label>
-        <input id="tokenInput" type="password" placeholder="X-Access-Token" autocomplete="off" />
+        <div id="tokenWrap" class="hidden">
+          <label class="field-label tight" for="tokenInput">访问令牌</label>
+          <input id="tokenInput" type="password" placeholder="X-Access-Token" autocomplete="off" />
+        </div>
       </div>
     </section>
 
@@ -64,7 +66,7 @@
       <div class="qualities" id="qualities"></div>
 
       <div class="copy-row hidden" id="copyRow">
-        <label class="field-label" for="playUrlOut">播放地址（已是你的域名，可给 poplayer / VLC）</label>
+        <label class="field-label" for="playUrlOut">播放地址（可给 PotPlayer / VLC）</label>
         <div class="row">
           <input id="playUrlOut" type="text" readonly />
           <button id="copyBtn" type="button" class="ghost">复制</button>
@@ -78,8 +80,8 @@
     </section>
 
     <footer class="footer">
-      <p>仅供个人学习与自用。内容版权归 SOOP / YouTube 与版权方所有。勿公开分享代理链接。</p>
-      <p>地区限制依赖<strong>服务器出口 IP</strong>。YouTube 解析基于 yt-dlp；年龄限制内容可配置 cookies 文件。</p>
+      <p>仅供个人学习与自用。内容版权归 SOOP / YouTube 与版权方。勿公开分享代理链接。</p>
+      <p>地区限制依赖<strong>服务器出口 IP</strong>。YouTube 使用 yt-dlp；直播代理由 Go 实现。</p>
     </footer>
   </div>
   <script src="/app.js"></script>

@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 *.log
 .DS_Store
+/soop-parser
+/bin/
+*.exe

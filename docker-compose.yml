@@ -2,14 +2,11 @@ services:
   soop-parser:
     build: .
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     env_file:
       - path: .env
         required: false
     environment:
       HOST: "0.0.0.0"
       PORT: "8080"
-      # ACCESS_TOKEN: "change-me"
-      # SOOP_USERNAME: ""
-      # SOOP_PASSWORD: ""
     restart: unless-stopped
