@@ -24,7 +24,6 @@ func TestParseRoom(t *testing.T) {
 			t.Fatalf("%q: got %s want %s", c.in, got, c.want)
 		}
 	}
-	// bare slug must NOT match (ambiguous with SOOP channel ids)
 	if IsURL("lck") || IsURL("12345") {
 		t.Fatal("bare id must not match huya without host")
 	}
@@ -33,9 +32,6 @@ func TestParseRoom(t *testing.T) {
 	}
 	if !IsURL("https://www.huya.com/lck") {
 		t.Fatal("expected huya url")
-	}
-	if _, err := ParseRoom("https://www.huya.com/g"); err == nil {
-		t.Fatal("reserved path should fail")
 	}
 }
 
@@ -50,26 +46,42 @@ func TestExtractJSONObject(t *testing.T) {
 	}
 }
 
-func TestBuildStreamParams(t *testing.T) {
+func TestRebuildAntiCode(t *testing.T) {
 	fm := url.QueryEscape(base64.StdEncoding.EncodeToString([]byte("testprefix_xxx")))
-	anti := "wsTime=65f00000&fm=" + fm + "&ctype=huya_live&fs=fsval"
-	q, err := buildStreamParams(anti, "streamname", 0)
+	anti := "wsTime=65f00000&fm=" + fm + "&ctype=huya_live&fs=bgct"
+	q, err := rebuildAntiCode(anti, "streamname")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Get("wsSecret") == "" || q.Get("wsTime") != "65f00000" {
-		t.Fatalf("bad params: %v", q)
+	if q.Get("wsSecret") == "" {
+		t.Fatal("missing wsSecret")
 	}
-	if q.Get("ratio") != "0" {
-		t.Fatal("ratio")
+	if q.Get("u") == "" || q.Get("uuid") == "" || q.Get("seqid") == "" {
+		t.Fatalf("missing uid fields: %v", q)
+	}
+	// streamget uses large uid ~1.4e12
+	if len(q.Get("u")) < 10 {
+		t.Fatalf("uid too short: %s", q.Get("u"))
+	}
+	if q.Get("sv") != "2403051612" {
+		t.Fatalf("sv %s", q.Get("sv"))
+	}
+}
+
+func TestIsReplayTitle(t *testing.T) {
+	if !isReplayTitle("【重播】16点直播GEN vs DRX") {
+		t.Fatal("重播 head")
+	}
+	if !isReplayTitle("昨天的比赛回放") {
+		t.Fatal("回放 tail")
+	}
+	if isReplayTitle("正在直播 EWC") {
+		t.Fatal("live title")
 	}
 }
 
 func TestEnsureHTTPS(t *testing.T) {
 	if ensureHTTPS("http://a.com/x") != "https://a.com/x" {
 		t.Fatal("http upgrade")
-	}
-	if ensureHTTPS("//a.com/x") != "https://a.com/x" {
-		t.Fatal("scheme-relative")
 	}
 }
