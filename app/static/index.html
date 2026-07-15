@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>直播解析 · SOOP / YouTube</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div class="brand">
+        <span class="logo">LIVE</span>
+        <div>
+          <h1>直播解析</h1>
+          <p class="sub">SOOP · YouTube · 自托管代理 · 个人使用</p>
+        </div>
+      </div>
+      <div class="header-meta" id="configMeta">加载配置中…</div>
+    </header>
+
+    <section class="card">
+      <label class="field-label" for="urlInput">直播 / 视频链接</label>
+      <div class="row">
+        <input
+          id="urlInput"
+          type="url"
+          placeholder="SOOP 或 YouTube 链接，例如 https://www.youtube.com/watch?v=… 或 play.sooplive.com/…"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button id="resolveBtn" type="button">解析</button>
+      </div>
+
+      <div class="options">
+        <label class="check">
+          <input type="checkbox" id="proxyToggle" checked />
+          代理播放（推荐：用服务器 IP 拉流，本地无需 VPN）
+        </label>
+        <label class="field-label tight" for="pwdInput">SOOP 直播密码（可选）</label>
+        <input id="pwdInput" type="password" placeholder="仅 SOOP 密码房需要" autocomplete="off" />
+        <label class="field-label tight" for="tokenInput">访问令牌（若服务器启用了 ACCESS_TOKEN）</label>
+        <input id="tokenInput" type="password" placeholder="X-Access-Token" autocomplete="off" />
+      </div>
+    </section>
+
+    <section class="card hidden" id="errorCard">
+      <div class="error" id="errorText"></div>
+    </section>
+
+    <section class="card hidden" id="resultCard">
+      <div class="meta">
+        <h2 id="titleText">—</h2>
+        <div class="tags">
+          <span class="tag" id="platformTag"></span>
+          <span class="tag" id="liveTag"></span>
+          <span class="tag" id="authorTag"></span>
+          <span class="tag" id="channelTag"></span>
+          <span class="tag" id="bnoTag"></span>
+        </div>
+      </div>
+
+      <div class="qualities" id="qualities"></div>
+
+      <div class="copy-row hidden" id="copyRow">
+        <label class="field-label" for="playUrlOut">播放地址（已是你的域名，可给 poplayer / VLC）</label>
+        <div class="row">
+          <input id="playUrlOut" type="text" readonly />
+          <button id="copyBtn" type="button" class="ghost">复制</button>
+        </div>
+      </div>
+
+      <div class="player-wrap">
+        <video id="player" controls playsinline></video>
+        <p class="hint" id="playHint">选择清晰度后开始播放</p>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <p>仅供个人学习与自用。内容版权归 SOOP / YouTube 与版权方所有。勿公开分享代理链接。</p>
+      <p>地区限制依赖<strong>服务器出口 IP</strong>。YouTube 解析基于 yt-dlp；年龄限制内容可配置 cookies 文件。</p>
+    </footer>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
