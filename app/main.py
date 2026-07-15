@@ -165,13 +165,11 @@ async def head_method_support(request: Request, call_next):
     if hasattr(response, "body_iterator"):
         async for _ in response.body_iterator:
             pass
-        headers = MutableHeaders(response.headers)
-        headers.pop("content-length", None)
-        return Response(status_code=response.status_code, headers=dict(headers))
 
-    headers = MutableHeaders(getattr(response, "headers", {}))
-    headers.pop("content-length", None)
-    return Response(status_code=response.status_code, headers=dict(headers))
+    raw = dict(response.headers)
+    raw.pop("content-length", None)
+    raw.pop("Content-Length", None)
+    return Response(status_code=response.status_code, headers=raw)
 
 
 def require_access(
