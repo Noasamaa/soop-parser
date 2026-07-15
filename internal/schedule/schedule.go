@@ -214,8 +214,11 @@ func filterAndTrimMatches(matches []Match, pick *tournamentMeta) []Match {
 			done = append(done, m)
 		}
 	}
-	// keep only the most recent completed rows to avoid dumping full history
+	// trim oldest completed by start time
 	if len(done) > maxDoneKeep {
+		sort.SliceStable(done, func(i, j int) bool {
+			return done[i].StartTime.Before(done[j].StartTime)
+		})
 		done = done[len(done)-maxDoneKeep:]
 	}
 	out := make([]Match, 0, len(live)+len(soon)+len(done))
@@ -320,14 +323,21 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueLabel strin
 			bo = 1
 		}
 		teams := make([]Team, 0, len(e.Match.Teams))
-		var outcomes []string
+		var maxWins, totalWins int
+		hasOutcome := false
 		for _, t := range e.Match.Teams {
 			wins := 0
-			outcome := ""
 			if t.Result != nil {
 				wins = t.Result.GameWins
-				outcome = t.Result.Outcome
+				o := strings.ToLower(t.Result.Outcome)
+				if o == "win" || o == "loss" {
+					hasOutcome = true
+				}
 			}
+			if wins > maxWins {
+				maxWins = wins
+			}
+			totalWins += wins
 			rec := ""
 			if t.Record != nil {
 				rec = fmt.Sprintf("%d-%d", t.Record.Wins, t.Record.Losses)
@@ -336,10 +346,9 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueLabel strin
 				Code: t.Code, Name: t.Name, Image: ensureHTTPS(t.Image),
 				Wins: wins, Record: rec,
 			})
-			outcomes = append(outcomes, outcome)
 		}
-		// Riot often leaves event.state as "unstarted" even after results land.
-		state := normalizeMatchState(e.State, teams, outcomes, bo)
+		// Riot often leaves event.state as "unstarted" after results land.
+		state := normalizeMatchState(e.State, maxWins, totalWins, hasOutcome, bo)
 		out = append(out, Match{
 			ID: e.Match.ID, StartTime: st.UTC(), State: state,
 			Block: e.BlockName, BO: bo, Teams: teams,
@@ -351,7 +360,7 @@ func (s *Service) fetchSchedule(ctx context.Context, leagueID, leagueLabel strin
 
 // normalizeMatchState fixes stale API state using series results.
 // Observed: getSchedule returns state=unstarted while result.outcome is win/loss.
-func normalizeMatchState(apiState string, teams []Team, outcomes []string, bo int) string {
+func normalizeMatchState(apiState string, maxWins, totalWins int, hasOutcome bool, bo int) string {
 	switch apiState {
 	case "inProgress", "completed":
 		return apiState
@@ -360,21 +369,7 @@ func normalizeMatchState(apiState string, teams []Team, outcomes []string, bo in
 	if need < 1 {
 		need = 1
 	}
-	maxWins, totalWins := 0, 0
-	hasDecisiveOutcome := false
-	for i, t := range teams {
-		if t.Wins > maxWins {
-			maxWins = t.Wins
-		}
-		totalWins += t.Wins
-		if i < len(outcomes) {
-			o := strings.ToLower(outcomes[i])
-			if o == "win" || o == "loss" {
-				hasDecisiveOutcome = true
-			}
-		}
-	}
-	if maxWins >= need || hasDecisiveOutcome {
+	if maxWins >= need || hasOutcome {
 		return "completed"
 	}
 	if totalWins > 0 {
