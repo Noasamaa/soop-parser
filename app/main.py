@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 
 from app.config import Settings, get_settings
 from app.soop.client import SoopClient
@@ -101,9 +102,12 @@ async def lifespan(app: FastAPI):
         timeout=max(settings.http_timeout, 30.0),
         cookies_file=settings.youtube_cookies_file,
     )
-    # Shared httpx client for YouTube CDN proxy (Referer set per-request)
+    # Shared httpx client for CDN proxy (PotPlayer opens many parallel segment requests)
+    timeout = httpx.Timeout(settings.http_timeout, connect=10.0, read=60.0, write=30.0, pool=60.0)
+    limits = httpx.Limits(max_connections=100, max_keepalive_connections=40, keepalive_expiry=30.0)
     app.state.http = httpx.AsyncClient(
-        timeout=settings.http_timeout,
+        timeout=timeout,
+        limits=limits,
         follow_redirects=True,
         headers={
             "User-Agent": (
@@ -129,7 +133,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Live Parser",
     description="Self-hosted SOOP + YouTube live/VOD resolver with HLS/media proxy",
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
 
@@ -142,6 +146,32 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
 )
+
+
+@app.middleware("http")
+async def head_method_support(request: Request, call_next):
+    """
+    PotPlayer and many desktop players probe resources with HTTP HEAD.
+    StaticFiles mount at '/' breaks FastAPI auto-HEAD, so rewrite HEAD→GET
+    and return headers only (no body).
+    """
+    if request.method != "HEAD":
+        return await call_next(request)
+
+    request.scope["method"] = "GET"
+    response = await call_next(request)
+
+    # Drain streaming body so upstream connections close cleanly
+    if hasattr(response, "body_iterator"):
+        async for _ in response.body_iterator:
+            pass
+        headers = MutableHeaders(response.headers)
+        headers.pop("content-length", None)
+        return Response(status_code=response.status_code, headers=dict(headers))
+
+    headers = MutableHeaders(getattr(response, "headers", {}))
+    headers.pop("content-length", None)
+    return Response(status_code=response.status_code, headers=dict(headers))
 
 
 def require_access(
@@ -461,10 +491,11 @@ async def hls_proxy(
 
     return StreamingResponse(
         byte_iter(),
-        media_type="application/octet-stream",
+        media_type="video/mp2t",
         headers={
-            "Cache-Control": "no-store",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
             "Access-Control-Allow-Origin": "*",
+            "Accept-Ranges": "bytes",
         },
     )
 

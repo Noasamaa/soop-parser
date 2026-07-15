@@ -137,6 +137,8 @@ class PlaySessionStore:
         if session.expired():
             self._sessions.pop(token, None)
             return None
+        # Sliding TTL: keep session alive while player is still pulling
+        session.expires_at = time.time() + self.ttl
         return session
 
     def cleanup(self) -> None:
