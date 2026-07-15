@@ -80,8 +80,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/media/{token}", s.withAuth(s.handleMedia))
 	s.mux.HandleFunc("HEAD /api/media/{token}", s.withAuth(s.handleMediaHEAD))
 	if s.static != nil {
-		s.mux.Handle("GET /", s.static)
-		s.mux.Handle("HEAD /", s.static)
+		// No method prefix: avoids Go 1.22 ServeMux conflict with method-specific
+		// more-specific routes (HEAD / vs GET /health).
+		s.mux.Handle("/", s.static)
 	}
 }
 
